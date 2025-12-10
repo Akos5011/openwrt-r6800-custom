@@ -1,57 +1,41 @@
-name: Build OpenWrt for R6800
+name: Build OpenWrt for R6800 (older Ubuntu runner)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    env:
-      TZ: UTC
+    runs-on: ubuntu-20.04
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Clone OpenWrt sources
-      run: |
-        git clone --depth 1 https://github.com/openwrt/openwrt.git
-        cd openwrt
-        # Optionally checkout a stable release tag, e.g.:
-        # git checkout v24.10.0
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib flex git \
+            libncurses-dev libssl-dev python3-distutils python3-setuptools \
+            zlib1g-dev rsync swig unzip wget
 
-    - name: Copy patches and config
-      run: |
-        cd openwrt
-        # Copy custom patch to mt76 patches directory
-        mkdir -p package/kernel/mt76/patches
-        cp ../patches/999-my-mt76-fix.patch package/kernel/mt76/patches/
-        # If you provided a .config, copy it
-        if [ -f ../config/.config ]; then
-          cp ../config/.config .config
-        fi
+      - name: Clone OpenWrt & apply patch
+        run: |
+          git clone --depth 1 https://github.com/openwrt/openwrt.git
+          cd openwrt
+          mkdir -p package/kernel/mt76/patches
+          cp ../patches/999-my-mt76-fix.patch package/kernel/mt76/patches/
 
-    - name: Update feeds
-      run: |
-        cd openwrt
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: Update feeds & build
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+          make -s -j$(nproc)
 
-    - name: Configure for R6800 (ramips/mt7621)
-      run: |
-        cd openwrt
-        make defconfig
-
-    - name: Build firmware
-      run: |
-        cd openwrt
-        make -j$(nproc) V=s
-
-    - name: Upload built firmware artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-r6800-build
-        path: openwrt/bin/targets/ramips/mt7621/
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-r6800
+          path: openwrt/bin/targets/ramips/mt7621/

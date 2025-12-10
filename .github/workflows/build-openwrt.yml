@@ -216,7 +216,7 @@ jobs:
       # Upload compiled firmware to GitHub Release
       # ----------------------------------------------------
       - name: Upload release assets
-        if: ${{ steps.buildtype.outputs.snapshot == 'false' && github.event_name != 'schedule' }}
+        if: ${{ steps.buildtype.outputs.snapshot == 'true' && github.event_name == 'schedule' }}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

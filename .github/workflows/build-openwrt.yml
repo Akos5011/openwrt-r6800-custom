@@ -144,10 +144,11 @@ jobs:
          path: |
           src/staging_dir
           src/build_dir/toolchain-*
-         key: toolchain-${{ github.ref }}-${{ hashFiles('config/.config') }}
+         key: toolchain-${{ github.ref_name }}
          restore-keys: |
-          toolchain-${{ github.ref }}
+          toolchain-${{ github.ref_name }}
           toolchain-
+
 
       # -----------------------------------------
       # Expand config with defconfig
@@ -182,7 +183,8 @@ jobs:
          path: |
           src/staging_dir
           src/build_dir/toolchain-*
-         key: toolchain-${{ github.ref }}-${{ hashFiles('config/.config') }}
+         key: toolchain-${{ github.ref_name }}
+
 
       # -----------------------------------------
       # Upload firmware output

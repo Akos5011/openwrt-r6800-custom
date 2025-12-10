@@ -180,36 +180,48 @@ jobs:
           path: src/logs/
 
       # ---------------------------------
-      # Upload build artifacts
+      # Upload firmware as artifact
       # ---------------------------------
-      - name: Upload firmware
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ steps.detect_profile.outputs.profile }}
+          name: firmware
           path: src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/
           if-no-files-found: error
 
-      # ---------------------------------
-      # Create GitHub Release (snapshot or normal)
-      # ---------------------------------
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: success()
+      # ----------------------------------------------------
+      # Create GitHub Release
+      # ----------------------------------------------------
+      - name: Create Release
+        if: ${{ steps.buildtype.outputs.snapshot == 'true' && github.event_name = 'schedule' }}
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.stamp.outputs.tag }}
-          name: OpenWrt ${{ steps.detect_profile.outputs.profile }} (${{ steps.stamp.outputs.timestamp }})
+          tag_name: "build-${{ github.run_number }}"
+          release_name: "Build ${{ github.run_number }}"
           body: |
-            ## Device
-            **Profile:** ${{ steps.detect_profile.outputs.profile }}
-            **Target:** ${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}
+            ## Automatic OpenWrt Build
+            - Profile: ${{ steps.detect_profile.outputs.profile }}
+            - Target: ${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}
+            - WiFi: ${{ steps.wifi.outputs.wifi }}
 
-            ## WiFi Packages
-            ${{ steps.wifi.outputs.wifi }}
-
-            ## Build Type
-            ${{ steps.buildtype.outputs.snapshot == 'true' && 'Snapshot Build' || 'Normal Build' }}
-
-            ## Changelog
+            ### Changelog
             ${{ steps.changelog.outputs.log }}
-        files: |
-          src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/*
+          draft: false
+          prerelease: false
+
+      # ----------------------------------------------------
+      # Upload compiled firmware to GitHub Release
+      # ----------------------------------------------------
+      - name: Upload release assets
+        if: ${{ steps.buildtype.outputs.snapshot == 'false' && github.event_name != 'schedule' }}
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/
+          asset_name: firmware-${{ steps.detect_profile.outputs.profile }}.zip
+          asset_content_type: application/zip

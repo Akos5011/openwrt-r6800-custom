@@ -86,6 +86,11 @@ jobs:
           fi
           cp config/.config $OPENWRT_DIR/.config
           echo "Copied config/.config -> $OPENWRT_DIR/.config"
+          
+      - name: Set Git identity
+        run: |
+          git config --global user.email "builder@githubactions.local"
+          git config --global user.name "GitHub Actions"
 
       # -------------------------
       # 7) Apply patches reliably:

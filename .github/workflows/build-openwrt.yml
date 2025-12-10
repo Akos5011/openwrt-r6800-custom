@@ -1,58 +1,151 @@
-name: Build OpenWrt for R6800 (with two patches)
+name: Build OpenWrt R6800 (Optimized + Auto-Patches + Custom Config)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      OPENWRT_DIR: src
+      CCACHE_DIR: /home/runner/.ccache
+
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential gcc-multilib flex git \
-            libncurses-dev libssl-dev python3-distutils python3-setuptools \
-            zlib1g-dev rsync swig unzip wget
+    # ------------------------------
+    # Install dependencies
+    # ------------------------------
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential gcc-multilib g++-multilib \
+          flex bison gawk libncurses-dev libssl-dev python3-distutils \
+          python3-setuptools zlib1g-dev rsync swig unzip wget ccache
 
-      - name: Clone OpenWrt source
-        run: |
-          git clone --depth 1 https://github.com/openwrt/openwrt.git
-        # optionally checkout a specific release/tag
+    # ------------------------------
+    # Enable ccache for faster builds
+    # ------------------------------
+    - name: Configure ccache
+      run: |
+        mkdir -p $CCACHE_DIR
+        echo 'export PATH="/usr/lib/ccache:$PATH"' >> $GITHUB_ENV
 
-      - name: Apply patches
-        run: |
-          cd openwrt
-          # create patches dir for mt76 if not exists
-          mkdir -p package/kernel/mt76/patches
-          # copy your two patches into that directory
-          cp ../patches/999-my-mt76-fix.patch package/kernel/mt76/patches/
-          cp ../patches/010-mt7615-txpower-fix.patch package/kernel/mt76/patches/
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ runner.os }}-${{ hashFiles('patches/**/*.patch') }}
+        restore-keys: ccache-${{ runner.os }}-
 
-      - name: Update feeds
-        run: |
-          cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+    # ------------------------------
+    # Clone OpenWrt source
+    # ------------------------------
+    - name: Clone OpenWrt
+      run: |
+        git clone --depth 1 https://github.com/openwrt/openwrt.git $OPENWRT_DIR
 
-      - name: Configure build for R6800
-        run: |
-          cd openwrt
-          make defconfig
+    # ------------------------------
+    # Apply ALL patches from /patches/ automatically
+    # ------------------------------
+    - name: Apply patches
+      run: |
+        cd $OPENWRT_DIR
+        mkdir -p package/kernel/mt76/patches
+        if [ -d ../patches ]; then
+          echo "Applying patches from ../patches/"
+          cp ../patches/*.patch package/kernel/mt76/patches/ || true
+        else
+          echo "No patches/ folder found — skipping."
+        fi
 
-      - name: Build firmware (quiet)
-        run: |
-          cd openwrt
-          make -s -j$(nproc)
+    # ------------------------------
+    # Update + install feeds
+    # ------------------------------
+    - name: Update feeds
+      run: |
+        cd $OPENWRT_DIR
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
-      - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt‑r6800‑firmware
-          path: openwrt/bin/targets/ramips/mt7621/
-          if-no-files-found: error
-          include-hidden-files: true
+    # ------------------------------
+    # Copy custom .config from /config/.config
+    # ------------------------------
+    - name: Load custom configuration
+      run: |
+        cd $OPENWRT_DIR
+        if [ -f ../config/.config ]; then
+          echo "Using custom .config from /config/.config"
+          cp ../config/.config .config
+        else
+          echo "NO custom /config/.config found!"
+          exit 1
+        fi
+
+        # Expand config
+        make defconfig
+
+    # ------------------------------
+    # Build firmware
+    # ------------------------------
+    - name: Build firmware
+      run: |
+        cd $OPENWRT_DIR
+        make -s -j$(nproc) V=s
+
+    # ------------------------------
+    # Show all build output files (debug)
+    # ------------------------------
+    - name: List output tree
+      run: |
+        find $OPENWRT_DIR/bin/targets -type f
+
+    # ------------------------------
+    # Upload build artifacts
+    # ------------------------------
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-r6800-${{ github.sha }}-${{ github.run_number }}
+        path: |
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.bin
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.manifest
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.buildinfo
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.sha256sums
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.packages
+        if-no-files-found: error
+
+    # ------------------------------
+    # Create GitHub Release with firmware
+    # ------------------------------
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/heads/main')
+      with:
+        tag_name: r6800-${{ github.run_number }}
+        name: OpenWrt R6800 – Build #${{ github.run_number }}
+        body: |
+          Automated OpenWrt build for Netgear R6800  
+          Commit: `${{ github.sha }}`  
+          Includes ALL patches from /patches/  
+          Uses custom config: /config/.config  
+          ccache enabled, LTO optimization, GCC improvements  
+        files: |
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.bin
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.manifest
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.buildinfo
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.sha256sums
+          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.packages
+
+    # ------------------------------
+    # Save ccache
+    # ------------------------------
+    - name: Save updated ccache
+      if: always()
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ runner.os }}-${{ hashFiles('patches/**/*.patch') }}

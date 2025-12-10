@@ -57,6 +57,40 @@ jobs:
 
           echo "Replacing mt76 with upstream version:"
           ls -1 mt76
+          
+      # Turbo-ccache (max speed)
+      - name: Restore ccache
+        uses: actions/cache@v3
+        with:
+         path: ${{ github.workspace }}/.ccache
+         key: ccache-${{ github.ref }}-${{ hashFiles('config/.config') }}
+         restore-keys: |
+          ccache-${{ github.ref }}
+          ccache-
+
+      - name: Setup ccache
+        run: |
+         export CCACHE_DIR="${{ github.workspace }}/.ccache"
+         mkdir -p "$CCACHE_DIR"
+         ccache -M 10G
+         ccache --set-config=compression=true
+         ccache --set-config=compression_level=6
+         ccache --set-config=sloppiness=locale,time_macros,include_file_mtime
+         echo "CC='ccache gcc'" >> $GITHUB_ENV
+         echo "CXX='ccache g++'" >> $GITHUB_ENV
+         echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
+         ccache -s
+
+        # ----------------------------------------
+        # DL CACHE (after clone, before make)
+        # ----------------------------------------
+      - name: Restore DL cache
+        uses: actions/cache@v3
+        with:
+         path: src/dl
+         key: dl-cache
+
+
       # -----------------------------------------
       # Apply patches from patches/
       # (We use ONLY patch -p1 to avoid git identity issues)
@@ -75,6 +109,16 @@ jobs:
             fi
           done
 
+      # ----------------------------------------
+      # FEEDS CACHE
+      # ----------------------------------------
+      - name: Restore feed cache
+        uses: actions/cache@v3
+        with:
+         path: src/feeds
+         key: feed-${{ github.ref }}
+         restore-keys: feed-
+
       # -----------------------------------------
       # Install and update feeds
       # -----------------------------------------
@@ -83,6 +127,27 @@ jobs:
           cd src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: Save feed cache
+        if: success()
+        uses: actions/cache@v3
+        with:
+         path: src/feeds
+         key: feed-${{ github.ref }}
+         
+        # ----------------------------------------
+        # TOOLCHAIN + STAGING_DIR CACHE
+        # ----------------------------------------
+      - name: Restore toolchain cache
+        uses: actions/cache@v3
+        with:
+         path: |
+          src/staging_dir
+          src/build_dir/toolchain-*
+         key: toolchain-${{ github.ref }}-${{ hashFiles('config/.config') }}
+         restore-keys: |
+          toolchain-${{ github.ref }}
+          toolchain-
 
       # -----------------------------------------
       # Expand config with defconfig
@@ -109,6 +174,15 @@ jobs:
         with:
           name: build-logs
           path: src/logs/
+
+      - name: Save toolchain cache
+        if: success()
+        uses: actions/cache@v3
+        with:
+         path: |
+          src/staging_dir
+          src/build_dir/toolchain-*
+         key: toolchain-${{ github.ref }}-${{ hashFiles('config/.config') }}
 
       # -----------------------------------------
       # Upload firmware output

@@ -1,49 +1,43 @@
 From: CI Patch <ci@example.com>
-Subject: [PATCH] mt7615: add runtime option to bypass TSSI / force online calibration
+Subject: [PATCH] mt7615: add runtime option to disable precal and clear EEPROM flags
 
---- a/package/kernel/mt76/mt7615/mac.c
-+++ b/package/kernel/mt76/mt7615/mac.c
-@@ -1,6 +1,28 @@
- /* keep existing includes */
- #include <linux/module.h>
- #include <linux/kernel.h>
-+#include <linux/param.h>
+--- a/package/kernel/mt76/mt7615/eeprom.c
++++ b/package/kernel/mt76/mt7615/eeprom.c
+@@ -8,6 +8,12 @@
+ #include <linux/of.h>
+ #include "mt7615.h"
+ #include "eeprom.h"
++#include <linux/moduleparam.h>
 +
-+/* Runtime knob to bypass TSSI/EEPROM-based TX power calibration and force
-+ * the driver to use online calibration paths (e.g. in-band/autocal).
-+ *
-+ * Use this when upstream EEPROM data or TSSI logic is known-broken or
-+ * you prefer dynamic calibration (typical for snapshots & testing).
-+ *
-+ * Default: enabled (bypass TSSI), change via module parameter if needed.
-+ */
-+static bool mt7615_bypass_tssi = true;
-+module_param(mt7615_bypass_tssi, bool, 0444);
-+MODULE_PARM_DESC(mt7615_bypass_tssi, "Bypass mt7615 TSSI/EEPROM TXpower calibration and use runtime calibration");
++static bool mt7615_disable_precal = true;
++module_param(mt7615_disable_precal, bool, 0444);
++MODULE_PARM_DESC(mt7615_disable_precal, "Disable use of pre-calibration data from EEPROM/flash for mt7615");
  
- /* example: in newer mt7615 sources the set_txpower or init path calls
-  * a calibration routine — we add a safe conditional hook so that when
-  * mt7615_bypass_tssi is true those calibration entry-points are skipped
-  * or forced to runtime flows.
-  */
+ static int mt7615_efuse_read(struct mt7615_dev *dev, u32 base,
+ 			     u16 addr, u8 *data)
 @@
- static void mt7615_some_init_function(struct mt7615_phy *phy)
- {
-+    /* Defensive bypass: if the param is set, disable direct TSSI/eeprom
-+     * enforced power adjustments here and log for visibility. The exact
-+     * symbols/functions differ between mt76 revisions; we guard with
-+     * presence checks where possible.
-+     */
-+    if (mt7615_bypass_tssi) {
-+#if defined(CONFIG_MT76) || defined(CONFIG_MT7615)
-+        /* Best-effort: clear any PHY flags that indicate 'use EEPROM precal' */
-+        if (phy && phy->mt76 && phy->mt76->dev) {
-+            dev_info(phy->mt76->dev, "mt7615: bypassing TSSI/EEPROM TXpower calibrations (runtime enabled)\n");
-+        }
-+        /* If driver exposes direct tssi flag, prefer runtime path. This
-+         * is intentionally non-invasive: we avoid referencing removed fields.
-+         */
+ 	if (ret && dev->mt76.otp.data) {
+ 		memcpy(dev->mt76.eeprom.data, dev->mt76.otp.data,
+ 		       dev->mt76.otp.size);
+ 	} else {
+ 		dev->flash_eeprom = true;
+ 		mt7615_cal_free_data(dev);
++
++		/* If requested, clear historical precal indicator bytes so the
++		 * driver uses online/runtime calibration instead of precal
++		 * data from flash/eeprom. Guarded by symbol and parameter.
++		 */
++		if (mt7615_disable_precal) {
++#ifdef MT_EE_CALDATA_FLASH
++			if (dev && dev->mt76.eeprom.data) {
++				u8 *ee = (u8 *)dev->mt76.eeprom.data;
++				ee[MT_EE_CALDATA_FLASH] &= ~GENMASK(4, 0);
++				dev_info(dev->mt76.dev, "mt7615: cleared precal indicator (runtime calib enforced)\n");
++			}
++#else
++			/* MT_EE_CALDATA_FLASH not defined in this mt76 revision; skipping. */
 +#endif
-+    }
++		}
+ 	}
  
-     /* original init body follows (unchanged) */
+ 	mt7615_eeprom_parse_hw_cap(dev);

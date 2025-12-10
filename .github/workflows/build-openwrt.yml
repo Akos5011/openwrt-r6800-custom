@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 720
 
     steps:
       # -----------------------------------------
@@ -81,29 +81,12 @@ jobs:
           make defconfig
 
       # -----------------------------------------
-      # Detect target / subtarget / profile
-      # -----------------------------------------
-      - name: Detect Target + Profile
-        id: detect
-        run: |
-          TARGET=$(grep "^CONFIG_TARGET_[^_]*=y" src/.config | sed 's/CONFIG_TARGET_//;s/=y//')
-          SUBTARGET=$(grep "^CONFIG_TARGET_${TARGET}_.*=y" src/.config | sed "s/CONFIG_TARGET_${TARGET}_//;s/=y//")
-          PROFILE=$(grep "^CONFIG_TARGET_.*_DEVICE_.*=y" src/.config | sed 's/.*DEVICE_//;s/=y//')
-
-          echo "target=$TARGET"     >> $GITHUB_OUTPUT
-          echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
-          echo "profile=$PROFILE"     >> $GITHUB_OUTPUT
-
-          echo "Detected target: $TARGET / $SUBTARGET"
-          echo "Detected profile: $PROFILE"
-
-      # -----------------------------------------
       # Build firmware
       # -----------------------------------------
       - name: Build firmware
         run: |
           cd src
-          make -j$(nproc) V=sc
+          make -s -j$(nproc) V=sc
 
       # -----------------------------------------
       # Upload logs on failure

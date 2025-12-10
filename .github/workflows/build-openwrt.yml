@@ -1,291 +1,143 @@
-name: OpenWrt Build (Simple, Patches, Snapshot Release)
+name: Build OpenWrt (Stable Patch Workflow)
 
 on:
   push:
-    branches: ["main"]
-  schedule:
-    - cron: "0 2 * * *"   # daily snapshot at 02:00 UTC
+    branches: [ "main" ]
   workflow_dispatch:
-
-permissions:
-  contents: write   # needed to create Releases & upload release assets
-
-env:
-  OPENWRT_DIR: src
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  CCACHE_MAXSIZE: 10G
-  ARTIFACT_RETENTION_DAYS: 365
-  MAX_BUILD_RETRIES: 2   # set to 1 (no retry) for simplicity; increase if you like
+  schedule:
+    - cron: "0 2 * * *"   # nightly snapshot
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 720
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
 
     steps:
-      # -------------------------
-      # 1) Checkout repo
-      # -------------------------
+      # -----------------------------------------
+      # Fetch repository
+      # -----------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # -------------------------
-      # 2) Determine whether this is a scheduled snapshot
-      # -------------------------
-      - name: Determine build type
-        id: buildtype
+      # -----------------------------------------
+      # Required build dependencies
+      # -----------------------------------------
+      - name: Install packages
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
-            echo "snapshot=true" >> $GITHUB_OUTPUT
-          else
-            echo "snapshot=false" >> $GITHUB_OUTPUT
-          fi
-
-      # -------------------------
-      # 3) Generate date + run tag (YYYY-MM-DD_r<run>)
-      # -------------------------
-      - name: Generate build tag
-        id: buildstamp
-        run: |
-          DATE=$(date -u +"%Y-%m-%d")
-          TAG="${DATE}-r${GITHUB_RUN_NUMBER}"
-          echo "date=${DATE}" >> $GITHUB_OUTPUT
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Generated tag: ${TAG}"
-
-      # -------------------------
-      # 4) Install build dependencies
-      # -------------------------
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt update
+          sudo apt install -y \
             build-essential gcc-multilib g++-multilib \
             flex bison gawk libncurses-dev libssl-dev \
-            zlib1g-dev \
-            rsync swig unzip wget ccache jq dos2unix patch git
+            python3-distutils python3-setuptools \
+            zlib1g-dev swig rsync unzip wget ccache patch
 
-      # -------------------------
-      # 5) Clone OpenWrt source (fresh copy in $OPENWRT_DIR)
-      # -------------------------
-      - name: Clone OpenWrt source
+      # -----------------------------------------
+      # Clone OpenWrt
+      # -----------------------------------------
+      - name: Clone OpenWrt master
         run: |
-          rm -rf $OPENWRT_DIR || true
-          git clone --depth 1 https://github.com/openwrt/openwrt.git $OPENWRT_DIR
+          git clone --depth 1 https://github.com/openwrt/openwrt.git src
 
-      # -------------------------
-      # 6) Copy user's .config into tree (fail if missing)
-      # -------------------------
-      - name: Copy custom .config
+      # -----------------------------------------
+      # Apply custom .config from your repo
+      # -----------------------------------------
+      - name: Install .config
         run: |
-          if [ ! -f config/.config ]; then
-            echo "::error ::config/.config not found in repository root"
-            exit 1
-          fi
-          cp config/.config $OPENWRT_DIR/.config
-          echo "Copied config/.config -> $OPENWRT_DIR/.config"
-          
-      - name: Set Git identity
-        run: |
-          git config --global user.email "builder@githubactions.local"
-          git config --global user.name "GitHub Actions"
+          cp config/.config src/.config
 
-      # -------------------------
-      # 7) Apply patches reliably:
-      #    - tries `git am` (format-patch style)
-      #    - falls back to `patch -p1`
-      #    If any patch fails, step exits with error (so you see why)
-      # -------------------------
-      - name: Apply patches (git am -> patch -p1)
+      # -----------------------------------------
+      # Apply patches from patches/
+      # (We use ONLY patch -p1 to avoid git identity issues)
+      # -----------------------------------------
+      - name: Apply patches
         run: |
-          cd $OPENWRT_DIR
-          if [ ! -d ../patches ]; then
-            echo "No patches/ directory found in repo root — skipping patch step."
-            exit 0
-          fi
+          cd src
           shopt -s nullglob
-          FAILED=0
           for p in ../patches/*.patch; do
-            [ -f "$p" ] || continue
-            echo "=== Applying patch: $p ==="
-            # try git am first
-            if git am --signoff "$p" 2>/tmp/gitam.err; then
-              echo "git am succeeded for $p"
-              continue
+            echo "=== Applying $p ==="
+            if patch -p1 < "$p"; then
+              echo "Applied: $p"
             else
-              echo "git am failed for $p — trying patch -p1"
-              git am --abort 2>/dev/null || true
-              if patch -p1 < "$p" 2>/tmp/patch.err; then
-                echo "patch -p1 applied $p"
-                continue
-              else
-                echo "::error ::Patch failed: $p"
-                echo "==== git am stderr ===="
-                sed -n '1,200p' /tmp/gitam.err || true
-                echo "==== patch stderr ===="
-                sed -n '1,200p' /tmp/patch.err || true
-                FAILED=1
-                break
-              fi
+              echo "::error ::Patch failed: $p"
+              exit 1
             fi
           done
-          if [ "$FAILED" -ne 0 ]; then
-            echo "One or more patches failed to apply. See the log above."
-            exit 1
-          fi
-          echo "All patches applied (if any existed)."
 
-      # -------------------------
-      # 8) Update feeds & install packages
-      # -------------------------
+      # -----------------------------------------
+      # Install and update feeds
+      # -----------------------------------------
       - name: Update feeds
         run: |
-          cd $OPENWRT_DIR
+          cd src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # -------------------------
-      # 9) make defconfig (expand .config)
-      # -------------------------
-      - name: defconfig (expand .config)
+      # -----------------------------------------
+      # Expand config with defconfig
+      # -----------------------------------------
+      - name: Run defconfig
         run: |
-          cd $OPENWRT_DIR
+          cd src
           make defconfig
 
-      # -------------------------
-      # 10) Detect target/subtarget/profile/wifi
-      #     (sets outputs used in filenames and releases)
-      # -------------------------
-      - name: Detect target/profile
+      # -----------------------------------------
+      # Detect target / subtarget / profile
+      # -----------------------------------------
+      - name: Detect Target + Profile
         id: detect
         run: |
-          cd $OPENWRT_DIR
-          TARGET=$(grep '^CONFIG_TARGET_BOARD' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          SUB=$(grep '^CONFIG_TARGET_SUBTARGET' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          PROFILE_RAW=$(grep '^CONFIG_TARGET_PROFILE' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          PROFILE=$(echo "$PROFILE_RAW" | sed -e 's/^DEVICE_//' -e 's/^.*_//' || true)
-          WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)" .config 2>/dev/null || true)
-          WIFI_ONE_LINE=$(echo "$WIFI" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//' || true)
-          echo "target=$TARGET" >> $GITHUB_OUTPUT
-          echo "subtarget=$SUB" >> $GITHUB_OUTPUT
-          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
-          echo "wifi=$WIFI_ONE_LINE" >> $GITHUB_OUTPUT
-          echo "Detected: $TARGET / $SUB  profile=$PROFILE"
+          TARGET=$(grep "^CONFIG_TARGET_[^_]*=y" src/.config | sed 's/CONFIG_TARGET_//;s/=y//')
+          SUBTARGET=$(grep "^CONFIG_TARGET_${TARGET}_.*=y" src/.config | sed "s/CONFIG_TARGET_${TARGET}_//;s/=y//")
+          PROFILE=$(grep "^CONFIG_TARGET_.*_DEVICE_.*=y" src/.config | sed 's/.*DEVICE_//;s/=y//')
 
-      # -------------------------
-      # 11) Prepare ccache and speed flags
-      # -------------------------
-      - name: Configure ccache + MAKEFLAGS
-        run: |
-          mkdir -p "${CCACHE_DIR}"
-          echo "export CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
-          echo "export CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
-          echo "export MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
-          ccache -s || true
+          echo "target=$TARGET"     >> $GITHUB_OUTPUT
+          echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
+          echo "profile=$PROFILE"     >> $GITHUB_OUTPUT
 
-      # -------------------------
-      # 12) Build OpenWrt (single attempt; logs saved to ../build_full.log)
-      #     If build fails, subsequent steps with if: always() will upload logs.
-      # -------------------------
+          echo "Detected target: $TARGET / $SUBTARGET"
+          echo "Detected profile: $PROFILE"
+
+      # -----------------------------------------
+      # Build firmware
+      # -----------------------------------------
       - name: Build firmware
-        id: build
         run: |
-          cd $OPENWRT_DIR
-          set -o pipefail
-          make -s -j$(nproc) V=s 2>&1 | tee ../build_full.log
-        # allow subsequent upload steps to run even if build fails
-        continue-on-error: true
+          cd src
+          make -j$(nproc) V=sc
 
-      # -------------------------
-      # 13) Collect & upload build logs on failure (always runs)
-      # -------------------------
-      - name: Collect logs (always)
-        if: always()
-        run: |
-          TS=$(date -u +"%Y%m%dT%H%M%SZ")
-          LOGDIR=".github/workflow-logs/${TS}"
-          mkdir -p "${LOGDIR}"
-          cp ../build_full.log "${LOGDIR}/build_full.log" || true
-          # small list of logs (best-effort)
-          rsync -a --ignore-missing-args $OPENWRT_DIR/logs "${LOGDIR}/" || true
-          rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/package "${LOGDIR}/" || true
-          tar -czf "${LOGDIR}/staging_dir_small.tgz" --exclude='staging_dir/**/pkg' --exclude='staging_dir/toolchain-*/pkg' staging_dir 2>/dev/null || true
-          echo "Collected debug data in ${LOGDIR}"
-      - name: Upload logs artifact
-        if: always()
+      # -----------------------------------------
+      # Upload logs on failure
+      # -----------------------------------------
+      - name: Upload build logs
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-${{ github.run_id }}
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-          path: .github/workflow-logs/
+          name: build-logs
+          path: src/logs/
 
-      # -------------------------
-      # 14) If build succeeded: collect firmware into artifacts/<TAG> and zip it
-      # -------------------------
-      - name: Package firmware artifacts
-        if: success()
-        run: |
-          BUILD_TAG="${{ steps.buildstamp.outputs.tag }}"
-          TARGET="${{ steps.detect.outputs.target }}"
-          SUB="${{ steps.detect.outputs.subtarget }}"
-          OUTDIR="../artifacts/${BUILD_TAG}"
-          mkdir -p "${OUTDIR}/${TARGET}/${SUB}"
-          # copy anything from bin/targets/<target>/<subtarget> if present
-          if [ -d "$OPENWRT_DIR/bin/targets/${TARGET}/${SUB}" ]; then
-            cp -a "$OPENWRT_DIR/bin/targets/${TARGET}/${SUB}/"* "${OUTDIR}/${TARGET}/${SUB}/" || true
-          else
-            echo "Warning: expected build output directory not found: $OPENWRT_DIR/bin/targets/${TARGET}/${SUB}"
-            exit 1
-          fi
-          pushd "${OUTDIR}" >/dev/null 2>&1 || true
-          # create a .zip of the target dir for release upload
-          ZIPNAME="openwrt-${TARGET}-${SUB}-${BUILD_TAG}.zip"
-          zip -r "${ZIPNAME}" "${TARGET}/${SUB}" || true
-          echo "Created ${OUTDIR}/${ZIPNAME}"
-          popd >/dev/null 2>&1 || true
-
-      # -------------------------
-      # 15) Upload firmware artifact (zip) to the workflow run
-      # -------------------------
-      - name: Upload firmware artifact
-        if: success()
+      # -----------------------------------------
+      # Upload firmware output
+      # -----------------------------------------
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ github.run_id }}
-          path: artifacts/${{ steps.buildstamp.outputs.tag }}/*.zip
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          name: openwrt-${{ steps.detect.outputs.profile }}
+          path: src/bin/targets/${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}/
           if-no-files-found: error
 
-      # -------------------------
-      # 16) Create GitHub Release and attach zip (ONLY for scheduled snapshot builds)
-      #     Tag format (Option 3): snapshot-<YYYY-MM-DD>-r<run>-<profile>
-      # -------------------------
-      - name: Create Snapshot Release (attach artifact)
-        if: ${{ steps.buildtype.outputs.snapshot == 'true' && success() }}
+      # -----------------------------------------
+      # Optional: Create GitHub Release (snapshot only)
+      # -----------------------------------------
+      - name: Create snapshot release
+        if: github.event_name == 'schedule'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: snapshot-${{ steps.buildstamp.outputs.tag }}-${{ steps.detect.outputs.profile || 'unknown' }}
-          name: Snapshot - ${{ steps.detect.outputs.profile || 'unknown' }} - ${{ steps.buildstamp.outputs.date }}
+          tag_name: snapshot-${{ steps.detect.outputs.profile }}-${{ github.run_id }}
+          name: "Snapshot for ${{ steps.detect.outputs.profile }} (build ${{ github.run_id }})"
           body: |
-            Device: ${{ steps.detect.outputs.profile || 'unknown' }}
-            Target: ${{ steps.detect.outputs.target || 'unknown' }}/${{ steps.detect.outputs.subtarget || 'unknown' }}
-            Date (UTC): ${{ steps.buildstamp.outputs.date }}
-            Run: ${{ github.run_number }}
-            WiFi packages: ${{ steps.detect.outputs.wifi || 'none' }}
+            Snapshot firmware for:
+            - Device: ${{ steps.detect.outputs.profile }}
+            - Target: ${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}
+            - Build ID: ${{ github.run_id }}
 
-            Changelog: (see repo)
-          files: |
-            artifacts/${{ steps.buildstamp.outputs.tag }}/*.zip
-
-      # -------------------------
-      # 17) Final summary (logs)
-      # -------------------------
-      - name: Summary
-        run: |
-          echo "Run: $GITHUB_RUN_NUMBER"
-          echo "Tag: ${{ steps.buildstamp.outputs.tag }}"
-          echo "Snapshot build: ${{ steps.buildtype.outputs.snapshot }}"
-          echo "Target: ${{ steps.detect.outputs.target || 'unknown' }}"
-          echo "Profile: ${{ steps.detect.outputs.profile || 'unknown' }}"
+          files: src/bin/targets/${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}/**

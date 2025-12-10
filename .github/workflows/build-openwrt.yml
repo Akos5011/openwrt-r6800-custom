@@ -1,8 +1,6 @@
-name: Build OpenWrt (Stable Patch Workflow)
+name: Build OpenWrt for R6800
 
 on:
-  push:
-    branches: [ "main" ]
   workflow_dispatch:
   schedule:
     - cron: "0 2 * * *"   # nightly snapshot
@@ -22,7 +20,7 @@ jobs:
       # -----------------------------------------
       # Required build dependencies
       # -----------------------------------------
-      - name: Install packages
+      - name: Install required build dependencies
         run: |
           sudo apt update
           sudo apt install -y \
@@ -80,17 +78,6 @@ jobs:
          echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
          ccache -s
 
-        # ----------------------------------------
-        # DL CACHE (after clone, before make)
-        # ----------------------------------------
-      - name: Restore DL cache
-        uses: actions/cache@v3
-        with:
-         path: src/dl
-         key: dl-cache
-         restore-keys: dl-cache
-
-
       # -----------------------------------------
       # Apply patches from patches/
       # (We use ONLY patch -p1 to avoid git identity issues)
@@ -110,8 +97,15 @@ jobs:
           done
 
       # ----------------------------------------
-      # FEEDS CACHE
+      # FEEDS CACHE AND DL CACHE
       # ----------------------------------------
+      - name: Restore DL cache
+        uses: actions/cache@v3
+        with:
+         path: src/dl
+         key: dl-cache
+         restore-keys: dl-cache
+      
       - name: Restore feeds cache
         uses: actions/cache@v3
         with:
@@ -134,6 +128,13 @@ jobs:
         with:
          path: src/feeds
          key: feeds-${{ github.ref_name }}
+         
+      - name: Save dl cache
+        if: success()
+        uses: actions/cache/save@v3
+        with:
+         path: src/dl
+         key: dl-cache
 
 
       # -----------------------------------------
@@ -150,7 +151,7 @@ jobs:
       - name: Build firmware
         run: |
           cd src
-          make -s -j$(nproc) V=sc
+          make -s -j$(nproc)
 
       # -----------------------------------------
       # Upload logs on failure

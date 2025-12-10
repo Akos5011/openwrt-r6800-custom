@@ -3,16 +3,16 @@ From: Ritaro Takenaka <ritarot634@gmail.com>
 Date: Mon, 3 Jan 2022 16:47:00 +0900
 Subject: [PATCH] disable pre calib
 
---- a/mt76/mt7615/eeprom.c
-+++ b/mt76/mt7615/eeprom.c
-@@ -352,6 +352,10 @@ int mt7615_eeprom_init(struct mt7615_dev *dev)
+--- a/package/kernel/mt76/mt7615/eeprom.c
++++ b/package/kernel/mt76/mt7615/eeprom.c
+@@ -352,6 +352,12 @@ int mt7615_eeprom_init(struct mt7615_dev *dev)
         } else {
                 dev->flash_eeprom = true;
                 mt7615_cal_free_data(dev);
 +
-+               /* disable pre-calibration data */
-+               ((u8 *)dev->mt76.eeprom.data)[MT_EE_CALDATA_FLASH] &= ~GENMASK(4, 0);
-+               dev_info(dev->mt76.dev, "mt7615: pre-calibration disabled, using online calibration\n");
++               /* Force-disable pre-calibration on mt7615 */
++               if (dev->mt76.eeprom.data) {
++                       ((u8 *)dev->mt76.eeprom.data)[MT_EE_CALDATA_FLASH] &= ~GENMASK(4, 0);
++                       dev_info(dev->mt76.dev, "mt7615: pre-calibration disabled\n");
++               }
         }
-
-        mt7615_eeprom_parse_hw_cap(dev)

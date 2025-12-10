@@ -1,0 +1,57 @@
+name: Build OpenWrt for R6800
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Clone OpenWrt sources
+      run: |
+        git clone --depth 1 https://github.com/openwrt/openwrt.git
+        cd openwrt
+        # Optionally checkout a stable release tag, e.g.:
+        # git checkout v24.10.0
+
+    - name: Copy patches and config
+      run: |
+        cd openwrt
+        # Copy custom patch to mt76 patches directory
+        mkdir -p package/kernel/mt76/patches
+        cp ../patches/999-my-mt76-fix.patch package/kernel/mt76/patches/
+        # If you provided a .config, copy it
+        if [ -f ../config/.config ]; then
+          cp ../config/.config .config
+        fi
+
+    - name: Update feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Configure for R6800 (ramips/mt7621)
+      run: |
+        cd openwrt
+        make defconfig
+
+    - name: Build firmware
+      run: |
+        cd openwrt
+        make -j$(nproc) V=s
+
+    - name: Upload built firmware artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-r6800-build
+        path: openwrt/bin/targets/ramips/mt7621/

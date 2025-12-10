@@ -1,499 +1,215 @@
-name: Build OpenWrt (Full Auto - Optimized, Patches, Upstream, Debug, Artifacts)
+name: Build OpenWrt (Auto + Snapshot)
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   schedule:
     - cron: "0 2 * * *"  # daily snapshot at 02:00 UTC
   workflow_dispatch:
 
 permissions:
-  contents: write   # required to create Releases & upload release assets
-  issues: write
-  checks: write
-
-env:
-  OPENWRT_DIR: src
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  CCACHE_MAXSIZE: 5G
-  MAX_BUILD_RETRIES: 2
-  ARTIFACT_RETENTION_DAYS: 30
+  contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 540
+    runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------
-      # Checkout repository with full history (needed for diffs)
-      # ---------------------------------------------------------
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      # ---------------------------------
+      # Checkout repository
+      # ---------------------------------
+      - uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # Determine build type: snapshot if scheduled run
-      # sets steps.buildtype.outputs.snapshot
-      # ---------------------------------------------------------
+      # ---------------------------------
+      # Determine build type
+      # ---------------------------------
       - name: Determine build type
         id: buildtype
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
             echo "snapshot=true" >> $GITHUB_OUTPUT
+            echo "Detected: SNAPSHOT build"
           else
             echo "snapshot=false" >> $GITHUB_OUTPUT
+            echo "Detected: NORMAL build"
           fi
 
-      # ---------------------------------------------------------
+      # ---------------------------------
+      # Generate timestamp and tag
+      # ---------------------------------
+      - name: Generate timestamp + tag
+        id: stamp
+        run: |
+          TS=$(date -u +"%Y-%m-%d_%H-%M-%S")
+          TAG="snapshot-$TS"  # fallback
+          
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            TAG="build-$TS"
+          fi
+          
+          echo "timestamp=$TS" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      # ---------------------------------
       # Install build dependencies
-      # ---------------------------------------------------------
-      - name: Install build dependencies
+      # ---------------------------------
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential gcc-multilib g++-multilib \
-            flex bison gawk libncurses-dev libssl-dev \
-            python3-distutils python3-setuptools zlib1g-dev \
-            rsync swig unzip wget ccache jq dos2unix patch git rsync
+          sudo apt-get install -y build-essential gcc-multilib flex git \
+            libncurses-dev libssl-dev python3-distutils python3-setuptools \
+            zlib1g-dev rsync swig unzip wget ccache
 
-      # ---------------------------------------------------------
-      # Clone OpenWrt source tree
-      # ---------------------------------------------------------
+      # ---------------------------------
+      # Clone OpenWrt
+      # ---------------------------------
       - name: Clone OpenWrt source
         run: |
-          rm -rf $OPENWRT_DIR || true
-          git clone --depth 1 https://github.com/openwrt/openwrt.git $OPENWRT_DIR
+          git clone --depth 1 https://github.com/openwrt/openwrt.git src
 
-      # ---------------------------------------------------------
-      # Copy user-provided .config into the OpenWrt tree
-      # expects repo/config/.config
-      # ---------------------------------------------------------
-      - name: Copy custom .config
+      # ---------------------------------
+      # Copy config
+      # ---------------------------------
+      - name: Apply custom .config
         run: |
-          if [ ! -f config/.config ]; then
-            echo "ERROR: config/.config not found in repository root" >&2
-            exit 1
-          fi
-          cp config/.config $OPENWRT_DIR/.config
-          echo "Copied config/.config to $OPENWRT_DIR/.config"
-          ls -l $OPENWRT_DIR/.config || true
+          cp config/.config src/.config
 
-      # ---------------------------------------------------------
-      # Basic .config validation (fail early on missing board)
-      # ---------------------------------------------------------
-      - name: Validate .config (basic)
-        id: cfgvalidate
+      # ---------------------------------
+      # Apply patches
+      # ---------------------------------
+      - name: Apply patches
         run: |
-          cd $OPENWRT_DIR
-          if ! grep -q '^CONFIG_TARGET_BOARD' .config; then
-            echo "::error ::Missing CONFIG_TARGET_BOARD in .config"
-            exit 1
-          fi
-          if ! grep -q '^CONFIG_TARGET_PROFILE' .config; then
-            echo "::warning ::No CONFIG_TARGET_PROFILE set — build may produce multiple profiles"
-          fi
-
-      # ---------------------------------------------------------
-      # Discover new/changed patches (best-effort)
-      # outputs: steps.patches_new.outputs.files & discovered
-      # ---------------------------------------------------------
-      - name: Discover new patches (since last commit)
-        id: patches_new
-        run: |
-          git fetch --no-tags --prune --depth=50 origin main || true
-          LAST_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || true)
-          if [ -n "$LAST_COMMIT" ]; then
-            git diff --name-only $LAST_COMMIT..HEAD -- patches || true
-          else
-            ls patches || true
-          fi > /tmp/patch_file_list || true
-          FILES=$(cat /tmp/patch_file_list | tr '\n' ' ' | sed 's/ $//')
-          COUNT=$(cat /tmp/patch_file_list | wc -l || true)
-          echo "files=$FILES" >> $GITHUB_OUTPUT
-          echo "discovered=$COUNT" >> $GITHUB_OUTPUT
-          echo "Patches discovered: $FILES"
-
-      # ---------------------------------------------------------
-      # Auto-format patches (dos2unix + whitespace cleanup + git-apply check)
-      # Keep results local; no pushes.
-      # ---------------------------------------------------------
-      - name: Auto-format patches (dos2unix + lint)
-        run: |
-          shopt -s nullglob
-          printf "Formatting patches...\n"
-          for f in patches/*.patch; do
-            [ -f "$f" ] || continue
-            printf " - %s\n" "$f"
-            dos2unix "$f" || true
-            sed -i -e 's/[[:space:]]*$//' "$f" || true
-            if ! git apply --check "$f" 2>/tmp/patch_check_err; then
-              printf "::warning ::Patch %s failed git apply --check; recording to patch_check_errors.txt\n" "$f"
-              echo "Patch $f failed git apply --check" >> patch_check_errors.txt
-              cat /tmp/patch_check_err >> patch_check_errors.txt || true
-            fi
-          done
-          if [ -f patch_check_errors.txt ]; then
-            echo "Some patches raised warnings during lint. See patch_check_errors.txt"
-            ls -l patch_check_errors.txt || true
-          fi
-
-      # ---------------------------------------------------------
-      # Apply patches into the build tree (dry-run then apply)
-      # Modifies src/ only; does not commit or push.
-      # ---------------------------------------------------------
-      - name: Apply patches (dry-run then apply)
-        id: patches_apply
-        run: |
-          set -e
-          cd $OPENWRT_DIR
-          mkdir -p package/kernel/mt76/patches
-          mkdir -p dts_patches
-          applied_list="/tmp/applied_patches.txt"
-          failed_list="/tmp/failed_patches.txt"
-          rm -f $applied_list $failed_list || true
+          cd src
           for p in ../patches/*.patch; do
             [ -f "$p" ] || continue
-            echo "DRY-RUN $p"
-            if patch --dry-run -p1 < "$p" 2>/tmp/patcherr; then
-              echo "Applying $p"
-              patch -p1 < "$p"
-              echo "$p" >> $applied_list
-            else
-              echo "Patch $p failed dry-run; saving error"
-              echo "$p failed" >> $failed_list
-              cat /tmp/patcherr >> ../patch-apply-errors.log || true
-            fi
-          done
-          if [ -f $applied_list ]; then
-            echo "Applied patches:"
-            cat $applied_list
-            cp $applied_list ..
-          fi
-          if [ -f $failed_list ]; then
-            echo "Failed patches:"
-            cat $failed_list
-            cp $failed_list ..
-          fi
-
-      # ---------------------------------------------------------
-      # Patch summary printing (kept in workspace for artifact upload)
-      # ---------------------------------------------------------
-      - name: Show patch summary (workspace copies)
-        if: always()
-        run: |
-          echo "Patch summary files (if present):"
-          ls -la ../applied_patches.txt ../failed_patches.txt ../patch-apply-errors.log || true
-          for f in ../applied_patches.txt ../failed_patches.txt ../patch-apply-errors.log; do
-            [ -f "$f" ] && echo "---- $f ----" && sed -n '1,200p' "$f" || true
+            echo "Applying $p"
+            patch -p1 < "$p"
           done
 
-      # ---------------------------------------------------------
-      # Apply DTS patches (optional)
-      # ---------------------------------------------------------
-      - name: Apply dts_patches (optional)
+      # ---------------------------------
+      # Feeds
+      # ---------------------------------
+      - name: Update feeds
         run: |
-          cd $OPENWRT_DIR
-          if [ -d ../dts_patches ]; then
-            for f in ../dts_patches/*.patch; do
-              [ -f "$f" ] || continue
-              echo "Applying DTS patch $f"
-              patch -p1 < "$f" || echo "DTS patch $f failed"
-            done
-          else
-            echo "No dts_patches/ folder found; skipping"
-          fi
-
-      # ---------------------------------------------------------
-      # Update feeds and install packages
-      # ---------------------------------------------------------
-      - name: Update feeds and install
-        run: |
-          cd $OPENWRT_DIR
+          cd src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ---------------------------------------------------------
-      # Expand .config (make defconfig) to produce final config
-      # ---------------------------------------------------------
-      - name: Expand .config (make defconfig)
+      # ---------------------------------
+      # defconfig
+      # ---------------------------------
+      - name: defconfig
         run: |
-          cd $OPENWRT_DIR
+          cd src
           make defconfig
 
-      # ---------------------------------------------------------
-      # Generate changelog (between previous tag/commit and HEAD)
-      # ---------------------------------------------------------
+      # ---------------------------------
+      # Detect target
+      # ---------------------------------
+      - name: Detect target
+        id: detect_target
+        run: |
+          TARGET=$(grep "^CONFIG_TARGET_[^_]*=y" src/.config | sed 's/CONFIG_TARGET_//;s/=y//')
+          SUBTARGET=$(grep "^CONFIG_TARGET_${TARGET}_.*=y" src/.config | sed "s/CONFIG_TARGET_${TARGET}_//;s/=y//")
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
+
+      # ---------------------------------
+      # Detect profile
+      # ---------------------------------
+      - name: Detect profile
+        id: detect_profile
+        run: |
+          PROFILE=$(grep "^CONFIG_TARGET_.*_DEVICE_.*=y" src/.config | sed 's/.*DEVICE_//;s/=y//')
+          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+
+      # ---------------------------------
+      # Detect WiFi packages
+      # ---------------------------------
+      - name: Detect WiFi drivers
+        id: wifi
+        run: |
+          WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)=y" src/.config || true)
+          WIFI_LIST=$(echo "$WIFI" | sed 's/CONFIG_PACKAGE_//g;s/=y//g' | tr '\n' ' ')
+          echo "wifi=$WIFI_LIST" >> $GITHUB_OUTPUT
+
+      # ---------------------------------
+      # Generate changelog
+      # ---------------------------------
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-          if [ -n "$PREV_TAG" ]; then
-            RANGE="$PREV_TAG..HEAD"
+          git fetch --depth=20 origin main
+          PREV=$(git rev-parse HEAD~1 || echo "INITIAL")
+          CURRENT=$(git rev-parse HEAD)
+          if [ "$PREV" = "INITIAL" ]; then
+            echo "First build" > changelog.txt
           else
-            PREV_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || true)
-            if [ -n "$PREV_COMMIT" ]; then
-              RANGE="$PREV_COMMIT..HEAD"
-            else
-              RANGE=""
-            fi
+            git log --pretty=format:"%h - %s" $PREV..$CURRENT > changelog.txt
           fi
-          if [ -z "$RANGE" ]; then
-            echo "log=First build — no changelog available." >> $GITHUB_OUTPUT
-            echo "First build — no changelog available." > changelog.txt
-          else
-            git log --pretty=format:"• %h - %s (%an)" $RANGE > changelog.txt || true
-            LOG_CONTENT=$(cat changelog.txt || echo "No log")
-            printf "log<<EOF\n%s\nEOF\n" "$LOG_CONTENT" >> $GITHUB_OUTPUT
-          fi
-          echo "Changelog:"
-          sed -n '1,200p' changelog.txt || true
+          echo "log<<EOF" >> $GITHUB_OUTPUT
+          cat changelog.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      # ---------------------------------------------------------
-      # Detect target, subtarget, profile, wifi packages
-      # sets outputs used by later steps
-      # ---------------------------------------------------------
-      - name: Detect target, subtarget, profile, wifi
-        id: detect
+      # ---------------------------------
+      # Speed optimizations
+      # ---------------------------------
+      - name: Optimize build
         run: |
-          cd $OPENWRT_DIR
-          TARGET=$(grep '^CONFIG_TARGET_BOARD' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          SUBTARGET=$(grep '^CONFIG_TARGET_SUBTARGET' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          PROFILE_RAW=$(grep '^CONFIG_TARGET_PROFILE' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          PROFILE=$(echo "$PROFILE_RAW" | sed -e 's/^DEVICE_//' -e 's/^.*_//' || true)
-          WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)" .config 2>/dev/null || true)
-          WIFI_ONE_LINE=$(echo "$WIFI" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//' || true)
-          echo "target=$TARGET" >> $GITHUB_OUTPUT
-          echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
-          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
-          echo "wifi=$WIFI_ONE_LINE" >> $GITHUB_OUTPUT
-          echo "Detected: $TARGET / $SUBTARGET profile=$PROFILE"
+          echo "export CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          echo "export CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
+          echo "export MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
 
-      # ---------------------------------------------------------
-      # Print pre-build stats for debugging
-      # ---------------------------------------------------------
-      - name: Print pre-build stats
+      # ---------------------------------
+      # Build OpenWrt
+      # ---------------------------------
+      - name: Build firmware
         run: |
-          echo "Config lines:"
-          wc -l $OPENWRT_DIR/.config || true
-          echo "Package top-level:"
-          ls -la $OPENWRT_DIR/package | head -n 20 || true
+          cd src
+          make -j$(nproc) V=sc
+        continue-on-error: true
 
-      # ---------------------------------------------------------
-      # Configure build optimization (safe toggles)
-      # - LTO via secret ENABLE_LTO (advanced)
-      # - warn if GLOBAL_CFLAGS secret provided
-      # ---------------------------------------------------------
-      - name: Configure build optimization (safe)
-        run: |
-          cd $OPENWRT_DIR
-          if [ "${{ secrets.ENABLE_LTO }}" = "true" ]; then
-            echo "CONFIG_LTO=y" >> .config || true
-          fi
-          if [ -n "${{ secrets.GLOBAL_CFLAGS }}" ]; then
-            echo "::warning ::GLOBAL_CFLAGS is set in secrets; custom flags injection may break builds."
-          fi
-
-      # ---------------------------------------------------------
-      # Configure ccache directory and show stats
-      # ---------------------------------------------------------
-      - name: Configure ccache
-        run: |
-          mkdir -p "${CCACHE_DIR}"
-          echo "CCACHE_DIR=${CCACHE_DIR}"
-          ccache --version || true
-          ccache -s || true
-
-      # ---------------------------------------------------------
-      # Build timestamp: produce date and tag (date + run number)
-      # Outputs: steps.buildstamp.outputs.date and .tag
-      # Example tag: 2025-01-14-r42
-      # ---------------------------------------------------------
-      - name: Generate build timestamp
-        id: buildstamp
-        run: |
-          DATE=$(date -u +"%Y-%m-%d")
-          echo "date=$DATE" >> $GITHUB_OUTPUT
-          echo "tag=${DATE}-r${GITHUB_RUN_NUMBER}" >> $GITHUB_OUTPUT
-          echo "Generated build timestamp: ${DATE}-r${GITHUB_RUN_NUMBER}"
-
-      # ---------------------------------------------------------
-      # Build with retry logic. Writes ../build_full.log
-      # ---------------------------------------------------------
-      - name: Build firmware (with retries)
-        id: buildstep
-        run: |
-          cd $OPENWRT_DIR
-          export CCACHE_DIR="${CCACHE_DIR}"
-          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE}"
-          mkdir -p "${CCACHE_DIR}"
-          attempts=0
-          max=${MAX_BUILD_RETRIES}
-          set -o pipefail
-          while [ $attempts -le $max ]; do
-            attempts=$((attempts+1))
-            echo "=== Build attempt $attempts ==="
-            START=$(date +%s)
-            if make -j$(nproc) V=s 2>&1 | tee ../build_full.log; then
-              END=$(date +%s)
-              echo "BUILD_OK" > ../build_status || true
-              echo "duration=$((END-START))" >> ../build_status || true
-              echo "Build succeeded on attempt $attempts"
-              exit 0
-            else
-              echo "Build attempt $attempts failed"
-              if [ $attempts -gt $max ]; then
-                echo "All build attempts failed" > ../build_status
-                exit 1
-              fi
-              echo "Retrying in 5s..."
-              sleep 5
-            fi
-          done
-
-      # ---------------------------------------------------------
-      # Collect debug info (always). Curated to avoid huge uploads.
-      # ---------------------------------------------------------
-      - name: Collect debug info (always)
-        if: always()
-        run: |
-          TS=$(date -u +"%Y%m%dT%H%M%SZ")
-          LOGDIR=".github/workflow-logs/${TS}"
-          mkdir -p "${LOGDIR}"
-          if [ -f ../build_full.log ]; then
-            cp ../build_full.log "${LOGDIR}/build_full.log" || true
-          fi
-          rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/host "${LOGDIR}/" || true
-          rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/package "${LOGDIR}/" || true
-          tar -czf "${LOGDIR}/staging_dir_small.tgz" --exclude='staging_dir/**/pkg' --exclude='staging_dir/toolchain-*/pkg' staging_dir 2>/dev/null || true
-          uname -a > "${LOGDIR}/sysinfo.txt" || true
-          echo "ccache stats:" > "${LOGDIR}/ccache.txt" || true
-          ccache -s >> "${LOGDIR}/ccache.txt" || true
-          echo "Collected debug files in ${LOGDIR}"
-
-      # ---------------------------------------------------------
-      # Upload debug logs artifact (always)
-      # ---------------------------------------------------------
-      - name: Upload debug logs artifact
-        if: always()
+      # ---------------------------------
+      # Upload logs on failure
+      # ---------------------------------
+      - name: Upload logs on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-debug-${{ github.run_id }}
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-          path: |
-            .github/workflow-logs/
-            ../build_full.log
-            $OPENWRT_DIR/logs/
-            $OPENWRT_DIR/build_dir/
-            $OPENWRT_DIR/staging_dir/
+          name: build-logs
+          path: src/logs/
 
-      # ---------------------------------------------------------
-      # Package artifacts and metadata (only on success)
-      # Places artifacts under artifacts/<date>-r<run>/
-      # ---------------------------------------------------------
-      - name: Package artifacts and metadata
-        if: success()
-        run: |
-          cd $OPENWRT_DIR
-          BUILD_TAG="${{ steps.buildstamp.outputs.tag }}"
-          OUTDIR="../artifacts/${BUILD_TAG}"
-          mkdir -p "${OUTDIR}"
-          TARGET="${{ steps.detect.outputs.target || '' }}"
-          SUB="${{ steps.detect.outputs.subtarget || '' }}"
-          if [ -z "$TARGET" ] || [ -z "$SUB" ]; then
-            if [ -d bin/targets ]; then
-              TARGET=$(ls bin/targets | head -n1 || true)
-              SUB=$(ls bin/targets/$TARGET | head -n1 || true)
-            fi
-          fi
-          mkdir -p "${OUTDIR}/${TARGET}/${SUB}"
-          cp -a bin/targets/${TARGET}/${SUB}/* "${OUTDIR}/${TARGET}/${SUB}/" || true
-          pushd "${OUTDIR}/${TARGET}/${SUB}" >/dev/null 2>&1 || true
-          if ls 2>/dev/null | grep -q .; then
-            sha256sum * > sha256sums.txt || true
-          fi
-          for img in *.bin; do
-            [ -f "$img" ] || continue
-            if echo "$img" | grep -q "sysupgrade"; then
-              mkdir -p sysupgrade
-              mv "$img" sysupgrade/ || true
-            else
-              mkdir -p factory
-              mv "$img" factory/ || true
-            fi
-          done
-          popd >/dev/null 2>&1 || true
-          echo "Artifacts prepared in ${OUTDIR}"
-
-      # ---------------------------------------------------------
-      # Upload built firmware artifacts (only on success)
-      # ---------------------------------------------------------
-      - name: Upload firmware artifacts
-        if: success()
+      # ---------------------------------
+      # Upload build artifacts
+      # ---------------------------------
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ github.run_id }}
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-          path: artifacts/${{ steps.buildstamp.outputs.tag }}
+          name: openwrt-${{ steps.detect_profile.outputs.profile }}
+          path: src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/
           if-no-files-found: error
 
-      # ---------------------------------------------------------
-      # Create latest snapshot metadata (artifact) - no push
-      # ---------------------------------------------------------
-      - name: Create latest snapshot metadata (artifact)
-        if: success()
-        run: |
-          BUILD_TAG="${{ steps.buildstamp.outputs.tag }}"
-          METADIR="../artifacts/${BUILD_TAG}/meta"
-          mkdir -p "${METADIR}"
-          echo "run_id=${GITHUB_RUN_ID}" > "${METADIR}/snapshot-latest.txt"
-          date -u +"date=%Y-%m-%dT%H:%M:%SZ" >> "${METADIR}/snapshot-latest.txt"
-          echo "profile=${{ steps.detect.outputs.profile || 'unknown' }}" >> "${METADIR}/snapshot-latest.txt"
-          echo "target=${{ steps.detect.outputs.target || 'unknown' }}" >> "${METADIR}/snapshot-latest.txt"
-          echo "Wrote metadata to ${METADIR}"
-
-      # ---------------------------------------------------------
-      # Create GitHub Release for snapshot builds and attach artifacts
-      # Tag format (chosen Option 3):
-      #   snapshot-<YYYY-MM-DD>-r<run>-<profile>
-      # Where steps.buildstamp.outputs.date is YYYY-MM-DD and
-      # steps.buildstamp.outputs.tag is YYYY-MM-DD-r<run>.
-      # ---------------------------------------------------------
-      - name: Create GitHub Release (snapshot)
-        if: steps.buildtype.outputs.snapshot == 'true' && success()
+      # ---------------------------------
+      # Create GitHub Release (snapshot or normal)
+      # ---------------------------------
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        with:
-          tag_name: snapshot-${{ steps.buildstamp.outputs.tag }}-${{ steps.detect.outputs.profile || 'unknown' }}
-          name: "Snapshot - ${{ steps.detect.outputs.profile || 'unknown' }} - ${{ steps.buildstamp.outputs.date }} (run ${{ github.run_number }})"
-          body: |
-            Device: ${{ steps.detect.outputs.profile || 'unknown' }}
-            Target: ${{ steps.detect.outputs.target || 'unknown' }}/${{ steps.detect.outputs.subtarget || 'unknown' }}
-            Date (UTC): ${{ steps.buildstamp.outputs.date }}
-            Run number: ${{ github.run_number }}
-            WiFi packages: ${{ steps.detect.outputs.wifi || 'none' }}
-
-            Changelog:
-            ${{ steps.changelog.outputs.log || 'No changelog available.' }}
-          files: |
-            artifacts/${{ steps.buildstamp.outputs.tag }}/**
-
-      # ---------------------------------------------------------
-      # Prune old artifacts note (no deletion performed here)
-      # ---------------------------------------------------------
-      - name: Prune old artifacts (note)
         if: success()
-        run: |
-          echo "This workflow does not delete old artifacts. Use a separate cleanup workflow or the GitHub API to prune artifacts or releases."
+        with:
+          tag_name: ${{ steps.stamp.outputs.tag }}
+          name: OpenWrt ${{ steps.detect_profile.outputs.profile }} (${{ steps.stamp.outputs.timestamp }})
+          body: |
+            ## Device
+            **Profile:** ${{ steps.detect_profile.outputs.profile }}
+            **Target:** ${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}
 
-      # ---------------------------------------------------------
-      # Final summary printed to logs
-      # ---------------------------------------------------------
-      - name: Summary
-        run: |
-          echo "Workflow completed for run: ${GITHUB_RUN_ID}"
-          echo "Snapshot build: ${{ steps.buildtype.outputs.snapshot }}"
-          echo "Target: ${{ steps.detect.outputs.target || 'unknown' }}"
-          echo "Subtarget: ${{ steps.detect.outputs.subtarget || 'unknown' }}"
-          echo "Profile: ${{ steps.detect.outputs.profile || 'unknown' }}"
-          echo "Artifacts directory: artifacts/${{ steps.buildstamp.outputs.tag }}"
+            ## WiFi Packages
+            ${{ steps.wifi.outputs.wifi }}
+
+            ## Build Type
+            ${{ steps.buildtype.outputs.snapshot == 'true' && 'Snapshot Build' || 'Normal Build' }}
+
+            ## Changelog
+            ${{ steps.changelog.outputs.log }}
+        files: |
+          src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/*

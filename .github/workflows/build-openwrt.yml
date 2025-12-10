@@ -1,4 +1,4 @@
-name: Build OpenWrt for Netgear R6800
+name: Build OpenWrt (Full Auto - Optimized, Patches, Upstream, Debug, Artifacts)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # needed to push merge branch if auto-merge succeeds
+  contents: read
   issues: write
   checks: write
 
@@ -18,138 +18,137 @@ env:
   CCACHE_MAXSIZE: 5G
   MAX_BUILD_RETRIES: 2
   SNAPSHOT_HOUR: "02:00 UTC"
+  ARTIFACT_RETENTION_DAYS: 30
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 540
 
     steps:
+      # ---------------------------------------------------------
+      # Checkout repository (full history to be able to diff)
+      # ---------------------------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ---------------------------------------------------------
+      # Determine build type (snapshot if schedule)
+      # Outputs:
+      #   snapshot=true|false
+      # ---------------------------------------------------------
       - name: Determine build type
         id: buildtype
         run: |
-          echo "event=${{ github.event_name }}" >> $GITHUB_OUTPUT
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          echo "event=${GITHUB_EVENT_NAME}" >> $GITHUB_OUTPUT
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
             echo "snapshot=true" >> $GITHUB_OUTPUT
           else
             echo "snapshot=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install dependencies
+      # ---------------------------------------------------------
+      # Install dependencies (minimal + jq + dos2unix)
+      # ---------------------------------------------------------
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential gcc-multilib g++-multilib \
-            flex bison gawk libncurses-dev libssl-dev python3-distutils \
-            python3-setuptools zlib1g-dev rsync swig unzip wget ccache jq \
-            dos2unix patchgit
+          sudo apt-get install -y \
+            build-essential gcc-multilib g++-multilib \
+            flex bison gawk libncurses-dev libssl-dev \
+            python3-distutils python3-setuptools zlib1g-dev \
+            rsync swig unzip wget ccache jq dos2unix patch \
+            git-core rsync
 
-      - name: Clone OpenWrt
+      # ---------------------------------------------------------
+      # Clone OpenWrt source
+      # ---------------------------------------------------------
+      - name: Clone OpenWrt source
         run: |
+          rm -rf $OPENWRT_DIR
           git clone --depth 1 https://github.com/openwrt/openwrt.git $OPENWRT_DIR
 
-      # ---------------------------
-      # Auto-merge upstream OpenWrt
-      # ---------------------------
-      - name: Attempt auto-merge from upstream
-        id: upstream_merge
-        run: |
-          set -e
-          cd $OPENWRT_DIR
-          git remote add upstream https://github.com/openwrt/openwrt.git 2>/dev/null || true
-          git fetch upstream --depth=1
-          git checkout -b auto-merge-upstream || git checkout auto-merge-upstream
-          # try merge; if conflict, abort and create issue
-          if git merge --no-edit upstream/HEAD; then
-            echo "merge_status=merged" >> $GITHUB_OUTPUT
-            # push merged branch back (use GITHUB_TOKEN)
-            git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" HEAD:auto-merge-upstream -f
-            echo "merge_pushed=true" >> $GITHUB_OUTPUT
-          else
-            git merge --abort || true
-            echo "merge_status=conflict" >> $GITHUB_OUTPUT
-            # open issue to notify
-            gh_issue_title="Auto-merge upstream conflict: ${{ github.run_id }}"
-            gh_issue_body="Auto-merge from upstream failed with conflicts. Please merge upstream manually.\n\nRun: `git fetch upstream && git merge upstream/HEAD`"
-            # create an issue using the GitHub API
-            curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -d "$(jq -n --arg t "$gh_issue_title" --arg b "$gh_issue_body" '{title:$t, body:$b, labels:["auto-merge"]}')" \
-              "https://api.github.com/repos/${{ github.repository }}/issues" >/dev/null
-            echo "merge_pushed=false" >> $GITHUB_OUTPUT
-          fi
-
-      # ---------------------------
-      # Copy .config and validate
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Copy custom .config into the OpenWrt tree
+      # expects repo/config/.config present
+      # ---------------------------------------------------------
       - name: Copy custom .config
         run: |
           if [ ! -f config/.config ]; then
-            echo "ERROR: config/.config not found" >&2
+            echo "ERROR: config/.config not found in repository root" >&2
             exit 1
           fi
           cp config/.config $OPENWRT_DIR/.config
+          ls -l $OPENWRT_DIR/.config
 
-      - name: Validate .config (basic)
+      # ---------------------------------------------------------
+      # Basic .config validation
+      # ---------------------------------------------------------
+      - name: Validate .config (basic checks)
         id: cfgvalidate
         run: |
           cd $OPENWRT_DIR
-          # Basic check: must contain a target board
           if ! grep -q '^CONFIG_TARGET_BOARD' .config; then
             echo "::error ::Missing CONFIG_TARGET_BOARD in .config"
             exit 1
           fi
-          # Ensure profile exists
           if ! grep -q '^CONFIG_TARGET_PROFILE' .config; then
             echo "::warning ::No CONFIG_TARGET_PROFILE set — build may produce multiple profiles"
           fi
 
-      # ---------------------------
-      # Patch management: detect new patches & format
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Discover patches changed since last commit (best-effort)
+      # Produces: outputs.files and outputs.discovered
+      # ---------------------------------------------------------
       - name: Discover new patches (since last commit)
         id: patches_new
         run: |
-          git fetch --depth=50 origin main
-          LAST_COMMIT=$(git rev-parse HEAD~1 || echo "")
-          # list .patch files changed or added in patches/ since last commit
+          # attempt to find changed patch files since previous commit (best-effort)
+          git fetch --no-tags --prune --depth=50 origin main || true
+          LAST_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || true)
           if [ -n "$LAST_COMMIT" ]; then
             git diff --name-only $LAST_COMMIT..HEAD -- patches || true
           else
             ls patches || true
           fi > /tmp/patch_file_list || true
-          echo "files=$(cat /tmp/patch_file_list | tr '\n' ' ')" >> $GITHUB_OUTPUT
-          echo "discovered=$(cat /tmp/patch_file_list | wc -l)" >> $GITHUB_OUTPUT
+          FILES=$(cat /tmp/patch_file_list | tr '\n' ' ')
+          COUNT=$(cat /tmp/patch_file_list | wc -l || true)
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "discovered=$COUNT" >> $GITHUB_OUTPUT
+          echo "Patches discovered: $FILES"
+          cat /tmp/patch_file_list || true
 
-      - name: Auto-format patches (dos2unix + tidy)
+      # ---------------------------------------------------------
+      # Auto-format patches: dos2unix, normalize whitespace,
+      # and run git apply --check as a linter (no push performed)
+      # ---------------------------------------------------------
+      - name: Auto-format patches (dos2unix + lint)
         run: |
           shopt -s nullglob
+          printf "Formatting patches...\n"
           for f in patches/*.patch; do
             [ -f "$f" ] || continue
+            printf " - %s\n" "$f"
             dos2unix "$f" || true
-            # ensure patch headers look ok: use git apply --check as linter
-            if ! git apply --check "$f" 2>/dev/null; then
-              echo "::warning ::Patch $f failed git apply --check — will still copy as-is"
+            sed -i -e 's/[[:space:]]*$//' "$f" || true
+            if ! git apply --check "$f" 2>/tmp/patch_check_err; then
+              printf "::warning ::Patch %s failed git apply --check; recorded to patch_check_errors.txt\n" "$f"
+              echo "Patch $f failed git apply --check" >> patch_check_errors.txt
+              cat /tmp/patch_check_err >> patch_check_errors.txt || true
             fi
-            # normalize whitespace
-            sed -i -e 's/[[:space:]]*$//' "$f"
-            # commit formatting changes (optional)
-            git add "$f" || true
           done
-          # commit formatting fixes if any (use GITHUB_TOKEN)
-          if git diff --staged --quiet; then
-            echo "No formatting changes"
-          else
-            git commit -m "ci: auto-format patches" || true
-            git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" HEAD:main || true
+          if [ -f patch_check_errors.txt ]; then
+            echo "Some patches raised warnings during lint. See patch_check_errors.txt"
+            ls -l patch_check_errors.txt || true
           fi
 
-      # ---------------------------
-      # Apply patches with priority ordering & dry-run
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Apply patches (dry-run then apply) into the OpenWrt tree.
+      # Patches are applied in numeric sort order (000..999).
+      # This step does not commit or push; it modifies build tree only.
+      # ---------------------------------------------------------
       - name: Apply patches (dry-run then apply)
         id: patches_apply
         run: |
@@ -157,43 +156,52 @@ jobs:
           cd $OPENWRT_DIR
           mkdir -p package/kernel/mt76/patches
           mkdir -p dts_patches
-          # copy patches by numeric prefix sort (000..999)
+          echo "Applying patches into build tree..."
+          applied_list="/tmp/applied_patches.txt"
+          failed_list="/tmp/failed_patches.txt"
+          rm -f $applied_list $failed_list || true
           for p in ../patches/*.patch; do
             [ -f "$p" ] || continue
-            echo "DRY-RUN applying $p"
+            echo "DRY-RUN $p"
             if patch --dry-run -p1 < "$p" 2>/tmp/patcherr; then
-              echo "$p" >> /tmp/applied_patches
+              echo "Applying $p"
               patch -p1 < "$p"
+              echo "$p" >> $applied_list
             else
-              echo "Patch $p failed dry-run; saving error for diagnostics"
+              echo "Patch $p failed dry-run; saving error"
+              echo "$p failed" >> $failed_list
               cat /tmp/patcherr >> ../patch-apply-errors.log || true
-              echo "$p failed" >> /tmp/failed_patches
             fi
           done
-          # copy successful list to workspace
-          if [ -f /tmp/applied_patches ]; then
-            echo "applied:" > /tmp/patch_summary.txt
-            cat /tmp/applied_patches >> /tmp/patch_summary.txt
-            cp /tmp/patch_summary.txt ..
+          if [ -f $applied_list ]; then
+            echo "Applied patches:"
+            cat $applied_list
+            cp $applied_list ..
+          else
+            echo "No patches applied."
           fi
-          if [ -f /tmp/failed_patches ]; then
-            echo "failed:" > /tmp/patch_failures.txt
-            cat /tmp/failed_patches >> /tmp/patch_failures.txt
-            cp /tmp/patch_failures.txt ..
+          if [ -f $failed_list ]; then
+            echo "Failed patches:"
+            cat $failed_list
+            cp $failed_list ..
           fi
 
-      - name: Show patch summary
+      # ---------------------------------------------------------
+      # Show patch summary artifacts (so they will be uploaded)
+      # ---------------------------------------------------------
+      - name: Show patch summary (workspace copies)
         if: always()
         run: |
-          echo "Patch summary (applied/failed) in repo root:"
-          ls -l ../patch_summary.txt ../patch_failures.txt || true
-          echo "Contents:"
-          cat ../patch_summary.txt ../patch_failures.txt || true
+          echo "Patch summary files in repo root (if present):"
+          ls -la ../applied_patches.txt ../failed_patches.txt ../patch-apply-errors.log || true
+          for f in ../applied_patches.txt ../failed_patches.txt ../patch-apply-errors.log; do
+            [ -f "$f" ] && echo "---- $f ----" && sed -n '1,200p' "$f" || true
+          done
 
-      # ---------------------------
-      # Apply DTS patches (if present)
-      # ---------------------------
-      - name: Apply dts_patches
+      # ---------------------------------------------------------
+      # Apply any DTS patches from repo/dts_patches (if present)
+      # ---------------------------------------------------------
+      - name: Apply dts_patches (optional)
         run: |
           cd $OPENWRT_DIR
           if [ -d ../dts_patches ]; then
@@ -202,99 +210,119 @@ jobs:
               echo "Applying DTS patch $f"
               patch -p1 < "$f" || echo "DTS patch $f failed"
             done
+          else
+            echo "No dts_patches/ folder found; skipping"
           fi
 
-      # ---------------------------
-      # Update feeds and ensure packages exist
-      # ---------------------------
-      - name: Update feeds & validate packages
+      # ---------------------------------------------------------
+      # Update feeds and install
+      # ---------------------------------------------------------
+      - name: Update feeds and install
         run: |
           cd $OPENWRT_DIR
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # Validate packages referenced in patches (naive: grep for MODULE_ or PACKAGE_ names)
-          grep -hoE "CONFIG_PACKAGE_[a-zA-Z0-9_]+" ../patches/*.patch 2>/dev/null | sort -u > /tmp/patch_pkgs || true
-          if [ -s /tmp/patch_pkgs ]; then
-            echo "Packages referenced by patches:"
-            cat /tmp/patch_pkgs
-            # convert to feed package names
-            grep -hoE "CONFIG_PACKAGE_[A-Za-z0-9_\-]+" /tmp/patch_pkgs | sed 's/CONFIG_PACKAGE_//' | while read pkg; do
-              if [ -z "$(ls package feeds/*/packages 2>/dev/null | xargs -I{} bash -c 'ls {} 2>/dev/null | grep -E \"^'$pkg'\" || true')" ]; then
-                echo "::warning ::Referenced package $pkg not found in feeds"
-              fi
-            done
-          fi
 
-      # ---------------------------
-      # Make defconfig (expand .config)
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Expand .config (make defconfig)
+      # ---------------------------------------------------------
       - name: Expand .config (make defconfig)
         run: |
           cd $OPENWRT_DIR
           make defconfig
 
-      # ---------------------------
-      # Generate kernel config diff (if patches touched kernel)
-      # ---------------------------
-      - name: Save kernel config & generate diff
+      # ---------------------------------------------------------
+      # Generate changelog between last tag/commit and current HEAD.
+      # Outputs: steps.changelog.outputs.log
+      # ---------------------------------------------------------
+      - name: Generate changelog
+        id: changelog
         run: |
-          cd $OPENWRT_DIR
-          if [ -f .config ]; then
-            make kernel_menuconfig -s || true
-            cp .config ../config_used_by_build.config || true
-            # save current kernel config
-            scripts/kconfig/merge_config.sh --dump .config > current_config || true
-            # store diff compared to repo baseline if available
-            if [ -f ../baseline_kernel.config ]; then
-              diff -u ../baseline_kernel.config current_config > ../kernel_config_diff.patch || true
+          # Try to find a previous tag; if none, use HEAD~1 as fallback
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="$PREV_TAG..HEAD"
+          else
+            PREV_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || true)
+            if [ -n "$PREV_COMMIT" ]; then
+              RANGE="$PREV_COMMIT..HEAD"
+            else
+              RANGE=""
             fi
           fi
+          if [ -z "$RANGE" ]; then
+            echo "log=First build — no changelog available." >> $GITHUB_OUTPUT
+            echo "First build — no changelog available." > changelog.txt
+          else
+            git log --pretty=format:"• %h - %s (%an)" $RANGE > changelog.txt || true
+            LOG_CONTENT=$(cat changelog.txt || echo "No log")
+            printf "log<<EOF\n%s\nEOF\n" "$LOG_CONTENT" >> $GITHUB_OUTPUT
+          fi
+          echo "Changelog generated:"
+          sed -n '1,200p' changelog.txt || true
 
-      # ---------------------------
-      # Detect target / subtarget / profile / wifi (robust)
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Detect target / subtarget / profile / wifi packages
+      # Outputs: steps.detect.outputs.{target,subtarget,profile,wifi}
+      # ---------------------------------------------------------
       - name: Detect target, subtarget, profile, wifi
         id: detect
         run: |
           cd $OPENWRT_DIR
-          TARGET=$(grep ^CONFIG_TARGET_BOARD .config | sed 's/.*=//' | tr -d '"')
-          SUBTARGET=$(grep ^CONFIG_TARGET_SUBTARGET .config | sed 's/.*=//' | tr -d '"')
-          PROFILE_RAW=$(grep ^CONFIG_TARGET_PROFILE .config | sed 's/.*=//' | tr -d '"')
-          PROFILE=$(echo "$PROFILE_RAW" | sed -e 's/^DEVICE_//' -e 's/^.*_//')
-          WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)" .config || true)
+          TARGET=$(grep '^CONFIG_TARGET_BOARD' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
+          SUBTARGET=$(grep '^CONFIG_TARGET_SUBTARGET' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
+          PROFILE_RAW=$(grep '^CONFIG_TARGET_PROFILE' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
+          # best-effort profile cleanup
+          PROFILE=$(echo "$PROFILE_RAW" | sed -e 's/^DEVICE_//' -e 's/^.*_//' || true)
+          WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)" .config 2>/dev/null || true)
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
           echo "profile=$PROFILE" >> $GITHUB_OUTPUT
-          echo "wifi=$(echo \"$WIFI\" | tr '\n' ' ')" >> $GITHUB_OUTPUT
-          echo "Detected $TARGET/$SUBTARGET profile=$PROFILE wifi=$(echo \"$WIFI\" | tr '\n' ' ')"
+          # compress wifi list on one line
+          WIFI_ONE_LINE=$(echo "$WIFI" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')
+          echo "wifi=$WIFI_ONE_LINE" >> $GITHUB_OUTPUT
+          echo "Detected: $TARGET / $SUBTARGET profile=$PROFILE wifi=$WIFI_ONE_LINE"
 
-      # ---------------------------
-      # Pre-build: print sizes & stats
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Print some pre-build stats
+      # ---------------------------------------------------------
       - name: Print pre-build stats
         run: |
+          echo "Config lines:"
           wc -l $OPENWRT_DIR/.config || true
-          ls -la $OPENWRT_DIR/package || true
+          echo "Top directories:"
+          ls -la $OPENWRT_DIR/package | head -n 20 || true
 
-      # ---------------------------
-      # Configure build optimization (LTO, GCC flags)
-      # ---------------------------
-      - name: Configure build optimization
+      # ---------------------------------------------------------
+      # Configure build optimization (LTO toggle via secret,
+      # global cflags via secret). Safe modifications only.
+      # ---------------------------------------------------------
+      - name: Configure build optimization (safe)
         run: |
           cd $OPENWRT_DIR
-          # Toggle LTO via env (simple approach: append to .config)
-          if [ "${{ secrets.ENABLE_LTO }}" = "true" ]; then
+          # Enable CCACHE if desired
+          if [ "${ENABLE_LTO:-}" = "true" ] || [ "${{ secrets.ENABLE_LTO }}" = "true" ]; then
             echo "CONFIG_LTO=y" >> .config || true
           fi
-          # Example: set cflags -O2 or -Os when desired (careful: may break reproducibility)
           if [ -n "${{ secrets.GLOBAL_CFLAGS }}" ]; then
-            # inject to top-level Makefile.local or .config if supported
-            echo "CONFIG_CCACHE=y" >> .config || true
+            # Do not force arbitrary flags that break builds; provide a safe hint
+            echo "::warning ::GLOBAL_CFLAGS is set in secrets; custom flags injection is advanced and may break builds."
           fi
 
-      # ---------------------------
-      # Build with retry logic and timeline
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Prepare ccache environment
+      # ---------------------------------------------------------
+      - name: Configure ccache
+        run: |
+          mkdir -p "${CCACHE_DIR}"
+          echo "CCACHE_DIR=${CCACHE_DIR}"
+          ccache --version || true
+          ccache -s || true
+
+      # ---------------------------------------------------------
+      # Build with retry logic. Build logs to ../build_full.log
+      # On failure the job continues to the debug steps which upload logs.
+      # ---------------------------------------------------------
       - name: Build firmware (with retries)
         id: buildstep
         run: |
@@ -304,14 +332,16 @@ jobs:
           mkdir -p "${CCACHE_DIR}"
           attempts=0
           max=${MAX_BUILD_RETRIES}
+          set -o pipefail
           while [ $attempts -le $max ]; do
             attempts=$((attempts+1))
-            echo "Build attempt $attempts"
+            echo "=== Build attempt $attempts ==="
             START=$(date +%s)
             if make -j$(nproc) V=s 2>&1 | tee ../build_full.log; then
               END=$(date +%s)
-              echo "BUILD_OK" > ../build_status
-              echo "duration=$((END-START))" >> ../build_status
+              echo "BUILD_OK" > ../build_status || true
+              echo "duration=$((END-START))" >> ../build_status || true
+              echo "Build succeeded on attempt $attempts"
               exit 0
             else
               echo "Build attempt $attempts failed"
@@ -324,120 +354,148 @@ jobs:
             fi
           done
 
-      # ---------------------------
-      # On failure: collect lots of debug info & upload
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Collect debug info (always) — small curated set to avoid huge uploads
+      # ---------------------------------------------------------
       - name: Collect debug info (always)
         if: always()
         run: |
-          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-          mkdir -p .github/workflow-logs/${TIMESTAMP}
-          cp ../build_full.log .github/workflow-logs/${TIMESTAMP}/ || true
-          # collect package build logs
-          rsync -a --ignore-missing-args build_dir/host .github/workflow-logs/${TIMESTAMP}/ || true
-          rsync -a --ignore-missing-args build_dir/package .github/workflow-logs/${TIMESTAMP}/ || true
-          # collect staging_dir and toolchain details (may be large)
-          tar -czf .github/workflow-logs/${TIMESTAMP}/staging_dir.tgz --exclude='staging_dir/toolchain-*/pkg' staging_dir 2>/dev/null || true
-          # basic system info
-          uname -a > .github/workflow-logs/${TIMESTAMP}/sysinfo.txt || true
-          echo "ccache stats:" > .github/workflow-logs/${TIMESTAMP}/ccache.txt || true
-          ccache -s >> .github/workflow-logs/${TIMESTAMP}/ccache.txt || true
+          TS=$(date -u +"%Y%m%dT%H%M%SZ")
+          LOGDIR=".github/workflow-logs/${TS}"
+          mkdir -p "${LOGDIR}"
+          # copy main build_full.log if present
+          if [ -f ../build_full.log ]; then
+            cp ../build_full.log "${LOGDIR}/build_full.log" || true
+          fi
+          # collect package build logs (first-level)
+          rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/host "${LOGDIR}/" || true
+          rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/package "${LOGDIR}/" || true
+          # small staging_dir snapshot (exclude large packages)
+          tar -czf "${LOGDIR}/staging_dir_small.tgz" --exclude='staging_dir/**/pkg' --exclude='staging_dir/toolchain-*/pkg' staging_dir 2>/dev/null || true
+          uname -a > "${LOGDIR}/sysinfo.txt" || true
+          echo "ccache stats:" > "${LOGDIR}/ccache.txt" || true
+          ccache -s >> "${LOGDIR}/ccache.txt" || true
+          echo "Collected debug files in ${LOGDIR}"
 
-      - name: Upload debug logs (on failure or always)
-        if: failure() || always()
+      # ---------------------------------------------------------
+      # Upload debug logs artifact (always)
+      # ---------------------------------------------------------
+      - name: Upload debug logs artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-debug-${{ github.run_id }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           path: |
             .github/workflow-logs/
-            build_full.log
+            ../build_full.log
             $OPENWRT_DIR/logs/
             $OPENWRT_DIR/build_dir/
             $OPENWRT_DIR/staging_dir/
 
-      # ---------------------------
-      # Prepare artifacts (split kernel/rootfs, manifest, sha)
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Package artifacts and metadata only if build succeeded
+      # ---------------------------------------------------------
       - name: Package artifacts and metadata
         if: success()
         run: |
           cd $OPENWRT_DIR
-          OUTDIR=../artifacts/${{ github.run_id }}
-          mkdir -p $OUTDIR
-          TARGET=${{ steps.detect.outputs.target }}
-          SUB=${{ steps.detect.outputs.subtarget }}
-          mkdir -p $OUTDIR/$TARGET/$SUB
-          cp -a bin/targets/$TARGET/$SUB/* $OUTDIR/$TARGET/$SUB/ || true
+          OUTDIR=../artifacts/${GITHUB_RUN_ID}
+          mkdir -p "$OUTDIR"
+          TARGET="${{ steps.detect.outputs.target || '' }}"
+          SUB="${{ steps.detect.outputs.subtarget || '' }}"
+          if [ -z "$TARGET" ] || [ -z "$SUB" ]; then
+            # try to detect from bin tree if not available
+            if [ -d bin/targets ]; then
+              TARGET=$(ls bin/targets | head -n1 || true)
+              SUB=$(ls bin/targets/$TARGET | head -n1 || true)
+            fi
+          fi
+          mkdir -p "$OUTDIR/$TARGET/$SUB"
+          cp -a bin/targets/$TARGET/$SUB/* "$OUTDIR/$TARGET/$SUB/" || true
+          pushd "$OUTDIR/$TARGET/$SUB" >/dev/null 2>&1 || true
           # generate sha256sums
-          pushd $OUTDIR/$TARGET/$SUB >/dev/null
-          sha256sum * > sha256sums.txt || true
-          # extract manifests/buildinfo if present
-          for f in *.manifest *.buildinfo 2>/dev/null; do [ -f "$f" ] || continue; done
-          # split images if sysupgrade vs factory detection (naive)
+          if ls 2>/dev/null | grep -q .; then
+            sha256sum * > sha256sums.txt || true
+          fi
+          # split sysupgrade vs factory by filename (best-effort)
           for img in *.bin; do
-            if echo "$img" | grep -q "sysupgrade" ; then
+            [ -f "$img" ] || continue
+            if echo "$img" | grep -q "sysupgrade"; then
               mkdir -p sysupgrade
-              mv "$img" sysupgrade/
+              mv "$img" sysupgrade/ || true
             else
               mkdir -p factory
-              mv "$img" factory/
+              mv "$img" factory/ || true
             fi
           done
-          popd >/dev/null
+          popd >/dev/null 2>&1 || true
+          echo "Artifacts prepared in $OUTDIR"
 
-      # ---------------------------
-      # Upload built firmware artifacts
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Upload built firmware artifacts (only on success)
+      # ---------------------------------------------------------
       - name: Upload firmware artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ github.run_id }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           path: artifacts/${{ github.run_id }}/
           if-no-files-found: error
 
-      # ---------------------------
-      # Maintain "latest" pointer + pruning
-      # ---------------------------
-      - name: Maintain latest snapshot pointer (if snapshot)
-        if: steps.buildtype.outputs.snapshot == 'true' && success()
+      # ---------------------------------------------------------
+      # Maintain latest pointer locally (no push) - write to artifact
+      # ---------------------------------------------------------
+      - name: Create latest snapshot metadata (artifact)
+        if: success()
         run: |
-          # create a small file with metadata and push to repo (requires push perms)
-          METAFILE="snapshot-latest-${{ steps.detect.outputs.profile }}.txt"
-          echo "run_id=${{ github.run_id }}" > $METAFILE
-          echo "date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $METAFILE
-          echo "profile=${{ steps.detect.outputs.profile }}" >> $METAFILE
-          echo "target=${{ steps.detect.outputs.target }}" >> $METAFILE
-          git add $METAFILE || true
-          git commit -m "chore: update latest snapshot pointer for ${{ steps.detect.outputs.profile }}" || true
-          git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" HEAD:main || true
+          METADIR="../artifacts/${GITHUB_RUN_ID}/meta"
+          mkdir -p "$METADIR"
+          echo "run_id=${GITHUB_RUN_ID}" > "$METADIR/snapshot-latest.txt"
+          date -u +"date=%Y-%m-%dT%H:%M:%SZ" >> "$METADIR/snapshot-latest.txt"
+          echo "profile=${{ steps.detect.outputs.profile || 'unknown' }}" >> "$METADIR/snapshot-latest.txt"
+          echo "target=${{ steps.detect.outputs.target || 'unknown' }}" >> "$METADIR/snapshot-latest.txt"
+          echo "Created metadata in $METADIR"
 
-      # ---------------------------
-      # Create Release (snapshot only) with changelog and assets
-      # ---------------------------
+      # ---------------------------------------------------------
+      # Create GitHub Release for snapshot builds (attach artifacts)
+      # Note: softprops/action-gh-release attaches files from the runner filesystem.
+      # ---------------------------------------------------------
       - name: Create GitHub Release (snapshot)
         if: steps.buildtype.outputs.snapshot == 'true' && success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: snapshot-${{ steps.detect.outputs.profile }}-${{ github.run_id }}
-          name: "Snapshot - ${{ steps.detect.outputs.profile }} - $(date -u +'%Y-%m-%d')"
+          tag_name: snapshot-${{ steps.detect.outputs.profile || 'unknown' }}-${{ github.run_id }}
+          name: "Snapshot - ${{ steps.detect.outputs.profile || 'unknown' }} - ${{ github.run_id }}"
           body: |
-            Device: ${{ steps.detect.outputs.profile }}
-            Target: ${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}
-            Date: $(date -u +"%Y-%m-%d %H:%M UTC")
-            WiFi packages: ${{ steps.detect.outputs.wifi }}
+            Device: ${{ steps.detect.outputs.profile || 'unknown' }}
+            Target: ${{ steps.detect.outputs.target || 'unknown' }}/${{ steps.detect.outputs.subtarget || 'unknown' }}
+            Date (UTC): ${{ now('utc') }}
+            WiFi packages: ${{ steps.detect.outputs.wifi || 'none' }}
 
             Changelog:
-            ${{ steps.changelog.outputs.log }}
-
+            ${{ steps.changelog.outputs.log || 'No changelog available.' }}
+          # attach everything under artifacts/<run_id>
           files: |
             artifacts/${{ github.run_id }}/**
 
-      # ---------------------------
-      # Prune old artifacts (keep last 10 snapshots)
-      # ---------------------------
-      - name: Prune old artifacts (best-effort)
+      # ---------------------------------------------------------
+      # Prune old artifacts note (no deletion)
+      # ---------------------------------------------------------
+      - name: Prune old artifacts (note)
         if: success()
         run: |
-          # NOTE: We can't delete artifacts via actions easily; just emit a warning and optionally create a cleanup issue
-          echo "Pruning not implemented due to GitHub Actions limitations; consider a separate cleanup workflow."
+          echo "Pruning not implemented in this workflow (no push perms). Use a separate cleanup workflow if desired."
+
+      # ---------------------------------------------------------
+      # Final status output
+      # ---------------------------------------------------------
+      - name: Summary
+        run: |
+          echo "Workflow completed for run: ${GITHUB_RUN_ID}"
+          echo "Build snapshot: ${{ steps.buildtype.outputs.snapshot }}"
+          echo "Target: ${{ steps.detect.outputs.target || 'unknown' }}"
+          echo "Subtarget: ${{ steps.detect.outputs.subtarget || 'unknown' }}"
+          echo "Profile: ${{ steps.detect.outputs.profile || 'unknown' }}"
+          echo "Artifacts: artifacts/${GITHUB_RUN_ID}/"

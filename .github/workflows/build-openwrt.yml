@@ -1,8 +1,8 @@
-name: Build OpenWrt for R6800 (older Ubuntu runner)
+name: Build OpenWrt for R6800 (with two patches)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -19,23 +19,40 @@ jobs:
             libncurses-dev libssl-dev python3-distutils python3-setuptools \
             zlib1g-dev rsync swig unzip wget
 
-      - name: Clone OpenWrt & apply patch
+      - name: Clone OpenWrt source
         run: |
           git clone --depth 1 https://github.com/openwrt/openwrt.git
-          cd openwrt
-          mkdir -p package/kernel/mt76/patches
-          cp ../patches/999-my-mt76-fix.patch package/kernel/mt76/patches/
+        # optionally checkout a specific release/tag
 
-      - name: Update feeds & build
+      - name: Apply patches
+        run: |
+          cd openwrt
+          # create patches dir for mt76 if not exists
+          mkdir -p package/kernel/mt76/patches
+          # copy your two patches into that directory
+          cp ../patches/999-my-mt76-fix.patch package/kernel/mt76/patches/
+          cp ../patches/010-mt7615-txpower-fix.patch package/kernel/mt76/patches/
+
+      - name: Update feeds
         run: |
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: Configure build for R6800
+        run: |
+          cd openwrt
           make defconfig
+
+      - name: Build firmware (quiet)
+        run: |
+          cd openwrt
           make -s -j$(nproc)
 
-      - name: Upload firmware
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-r6800
+          name: openwrt‑r6800‑firmware
           path: openwrt/bin/targets/ramips/mt7621/
+          if-no-files-found: error
+          include-hidden-files: true

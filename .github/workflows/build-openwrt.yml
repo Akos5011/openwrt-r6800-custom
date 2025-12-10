@@ -155,8 +155,9 @@ jobs:
       # -----------------------------------------
       - name: Run defconfig
         run: |
-          cd src
-          make defconfig
+         make clean
+         cd src
+         make defconfig
 
       # -----------------------------------------
       # Build firmware

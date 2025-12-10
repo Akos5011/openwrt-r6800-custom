@@ -8,16 +8,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # required to create Releases & upload release assets
   issues: write
   checks: write
 
 env:
   OPENWRT_DIR: src
-  CCACHE_DIR: ${{ runner.temp }}/ccache
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: 5G
   MAX_BUILD_RETRIES: 2
-  SNAPSHOT_HOUR: "02:00 UTC"
   ARTIFACT_RETENTION_DAYS: 30
 
 jobs:
@@ -27,7 +26,7 @@ jobs:
 
     steps:
       # ---------------------------------------------------------
-      # Checkout repository (full history to be able to diff)
+      # Checkout repository with full history (needed for diffs)
       # ---------------------------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -35,14 +34,12 @@ jobs:
           fetch-depth: 0
 
       # ---------------------------------------------------------
-      # Determine build type (snapshot if schedule)
-      # Outputs:
-      #   snapshot=true|false
+      # Determine build type: snapshot if scheduled run
+      # sets steps.buildtype.outputs.snapshot
       # ---------------------------------------------------------
       - name: Determine build type
         id: buildtype
         run: |
-          echo "event=${GITHUB_EVENT_NAME}" >> $GITHUB_OUTPUT
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
             echo "snapshot=true" >> $GITHUB_OUTPUT
           else
@@ -50,7 +47,7 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # Install dependencies (minimal + jq + dos2unix)
+      # Install build dependencies
       # ---------------------------------------------------------
       - name: Install build dependencies
         run: |
@@ -59,20 +56,19 @@ jobs:
             build-essential gcc-multilib g++-multilib \
             flex bison gawk libncurses-dev libssl-dev \
             python3-distutils python3-setuptools zlib1g-dev \
-            rsync swig unzip wget ccache jq dos2unix patch \
-            git-core rsync
+            rsync swig unzip wget ccache jq dos2unix patch git rsync
 
       # ---------------------------------------------------------
-      # Clone OpenWrt source
+      # Clone OpenWrt source tree
       # ---------------------------------------------------------
       - name: Clone OpenWrt source
         run: |
-          rm -rf $OPENWRT_DIR
+          rm -rf $OPENWRT_DIR || true
           git clone --depth 1 https://github.com/openwrt/openwrt.git $OPENWRT_DIR
 
       # ---------------------------------------------------------
-      # Copy custom .config into the OpenWrt tree
-      # expects repo/config/.config present
+      # Copy user-provided .config into the OpenWrt tree
+      # expects repo/config/.config
       # ---------------------------------------------------------
       - name: Copy custom .config
         run: |
@@ -81,12 +77,13 @@ jobs:
             exit 1
           fi
           cp config/.config $OPENWRT_DIR/.config
-          ls -l $OPENWRT_DIR/.config
+          echo "Copied config/.config to $OPENWRT_DIR/.config"
+          ls -l $OPENWRT_DIR/.config || true
 
       # ---------------------------------------------------------
-      # Basic .config validation
+      # Basic .config validation (fail early on missing board)
       # ---------------------------------------------------------
-      - name: Validate .config (basic checks)
+      - name: Validate .config (basic)
         id: cfgvalidate
         run: |
           cd $OPENWRT_DIR
@@ -99,13 +96,12 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # Discover patches changed since last commit (best-effort)
-      # Produces: outputs.files and outputs.discovered
+      # Discover new/changed patches (best-effort)
+      # outputs: steps.patches_new.outputs.files & discovered
       # ---------------------------------------------------------
       - name: Discover new patches (since last commit)
         id: patches_new
         run: |
-          # attempt to find changed patch files since previous commit (best-effort)
           git fetch --no-tags --prune --depth=50 origin main || true
           LAST_COMMIT=$(git rev-parse HEAD~1 2>/dev/null || true)
           if [ -n "$LAST_COMMIT" ]; then
@@ -113,16 +109,15 @@ jobs:
           else
             ls patches || true
           fi > /tmp/patch_file_list || true
-          FILES=$(cat /tmp/patch_file_list | tr '\n' ' ')
+          FILES=$(cat /tmp/patch_file_list | tr '\n' ' ' | sed 's/ $//')
           COUNT=$(cat /tmp/patch_file_list | wc -l || true)
           echo "files=$FILES" >> $GITHUB_OUTPUT
           echo "discovered=$COUNT" >> $GITHUB_OUTPUT
           echo "Patches discovered: $FILES"
-          cat /tmp/patch_file_list || true
 
       # ---------------------------------------------------------
-      # Auto-format patches: dos2unix, normalize whitespace,
-      # and run git apply --check as a linter (no push performed)
+      # Auto-format patches (dos2unix + whitespace cleanup + git-apply check)
+      # Keep results local; no pushes.
       # ---------------------------------------------------------
       - name: Auto-format patches (dos2unix + lint)
         run: |
@@ -134,7 +129,7 @@ jobs:
             dos2unix "$f" || true
             sed -i -e 's/[[:space:]]*$//' "$f" || true
             if ! git apply --check "$f" 2>/tmp/patch_check_err; then
-              printf "::warning ::Patch %s failed git apply --check; recorded to patch_check_errors.txt\n" "$f"
+              printf "::warning ::Patch %s failed git apply --check; recording to patch_check_errors.txt\n" "$f"
               echo "Patch $f failed git apply --check" >> patch_check_errors.txt
               cat /tmp/patch_check_err >> patch_check_errors.txt || true
             fi
@@ -145,9 +140,8 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # Apply patches (dry-run then apply) into the OpenWrt tree.
-      # Patches are applied in numeric sort order (000..999).
-      # This step does not commit or push; it modifies build tree only.
+      # Apply patches into the build tree (dry-run then apply)
+      # Modifies src/ only; does not commit or push.
       # ---------------------------------------------------------
       - name: Apply patches (dry-run then apply)
         id: patches_apply
@@ -156,7 +150,6 @@ jobs:
           cd $OPENWRT_DIR
           mkdir -p package/kernel/mt76/patches
           mkdir -p dts_patches
-          echo "Applying patches into build tree..."
           applied_list="/tmp/applied_patches.txt"
           failed_list="/tmp/failed_patches.txt"
           rm -f $applied_list $failed_list || true
@@ -177,8 +170,6 @@ jobs:
             echo "Applied patches:"
             cat $applied_list
             cp $applied_list ..
-          else
-            echo "No patches applied."
           fi
           if [ -f $failed_list ]; then
             echo "Failed patches:"
@@ -187,19 +178,19 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # Show patch summary artifacts (so they will be uploaded)
+      # Patch summary printing (kept in workspace for artifact upload)
       # ---------------------------------------------------------
       - name: Show patch summary (workspace copies)
         if: always()
         run: |
-          echo "Patch summary files in repo root (if present):"
+          echo "Patch summary files (if present):"
           ls -la ../applied_patches.txt ../failed_patches.txt ../patch-apply-errors.log || true
           for f in ../applied_patches.txt ../failed_patches.txt ../patch-apply-errors.log; do
             [ -f "$f" ] && echo "---- $f ----" && sed -n '1,200p' "$f" || true
           done
 
       # ---------------------------------------------------------
-      # Apply any DTS patches from repo/dts_patches (if present)
+      # Apply DTS patches (optional)
       # ---------------------------------------------------------
       - name: Apply dts_patches (optional)
         run: |
@@ -215,7 +206,7 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # Update feeds and install
+      # Update feeds and install packages
       # ---------------------------------------------------------
       - name: Update feeds and install
         run: |
@@ -224,7 +215,7 @@ jobs:
           ./scripts/feeds install -a
 
       # ---------------------------------------------------------
-      # Expand .config (make defconfig)
+      # Expand .config (make defconfig) to produce final config
       # ---------------------------------------------------------
       - name: Expand .config (make defconfig)
         run: |
@@ -232,13 +223,11 @@ jobs:
           make defconfig
 
       # ---------------------------------------------------------
-      # Generate changelog between last tag/commit and current HEAD.
-      # Outputs: steps.changelog.outputs.log
+      # Generate changelog (between previous tag/commit and HEAD)
       # ---------------------------------------------------------
       - name: Generate changelog
         id: changelog
         run: |
-          # Try to find a previous tag; if none, use HEAD~1 as fallback
           PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
           if [ -n "$PREV_TAG" ]; then
             RANGE="$PREV_TAG..HEAD"
@@ -258,12 +247,12 @@ jobs:
             LOG_CONTENT=$(cat changelog.txt || echo "No log")
             printf "log<<EOF\n%s\nEOF\n" "$LOG_CONTENT" >> $GITHUB_OUTPUT
           fi
-          echo "Changelog generated:"
+          echo "Changelog:"
           sed -n '1,200p' changelog.txt || true
 
       # ---------------------------------------------------------
-      # Detect target / subtarget / profile / wifi packages
-      # Outputs: steps.detect.outputs.{target,subtarget,profile,wifi}
+      # Detect target, subtarget, profile, wifi packages
+      # sets outputs used by later steps
       # ---------------------------------------------------------
       - name: Detect target, subtarget, profile, wifi
         id: detect
@@ -272,45 +261,42 @@ jobs:
           TARGET=$(grep '^CONFIG_TARGET_BOARD' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
           SUBTARGET=$(grep '^CONFIG_TARGET_SUBTARGET' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
           PROFILE_RAW=$(grep '^CONFIG_TARGET_PROFILE' .config 2>/dev/null | sed 's/.*=//' | tr -d '"' || true)
-          # best-effort profile cleanup
           PROFILE=$(echo "$PROFILE_RAW" | sed -e 's/^DEVICE_//' -e 's/^.*_//' || true)
           WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)" .config 2>/dev/null || true)
+          WIFI_ONE_LINE=$(echo "$WIFI" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//' || true)
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
           echo "profile=$PROFILE" >> $GITHUB_OUTPUT
-          # compress wifi list on one line
-          WIFI_ONE_LINE=$(echo "$WIFI" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')
           echo "wifi=$WIFI_ONE_LINE" >> $GITHUB_OUTPUT
-          echo "Detected: $TARGET / $SUBTARGET profile=$PROFILE wifi=$WIFI_ONE_LINE"
+          echo "Detected: $TARGET / $SUBTARGET profile=$PROFILE"
 
       # ---------------------------------------------------------
-      # Print some pre-build stats
+      # Print pre-build stats for debugging
       # ---------------------------------------------------------
       - name: Print pre-build stats
         run: |
           echo "Config lines:"
           wc -l $OPENWRT_DIR/.config || true
-          echo "Top directories:"
+          echo "Package top-level:"
           ls -la $OPENWRT_DIR/package | head -n 20 || true
 
       # ---------------------------------------------------------
-      # Configure build optimization (LTO toggle via secret,
-      # global cflags via secret). Safe modifications only.
+      # Configure build optimization (safe toggles)
+      # - LTO via secret ENABLE_LTO (advanced)
+      # - warn if GLOBAL_CFLAGS secret provided
       # ---------------------------------------------------------
       - name: Configure build optimization (safe)
         run: |
           cd $OPENWRT_DIR
-          # Enable CCACHE if desired
-          if [ "${ENABLE_LTO:-}" = "true" ] || [ "${{ secrets.ENABLE_LTO }}" = "true" ]; then
+          if [ "${{ secrets.ENABLE_LTO }}" = "true" ]; then
             echo "CONFIG_LTO=y" >> .config || true
           fi
           if [ -n "${{ secrets.GLOBAL_CFLAGS }}" ]; then
-            # Do not force arbitrary flags that break builds; provide a safe hint
-            echo "::warning ::GLOBAL_CFLAGS is set in secrets; custom flags injection is advanced and may break builds."
+            echo "::warning ::GLOBAL_CFLAGS is set in secrets; custom flags injection may break builds."
           fi
 
       # ---------------------------------------------------------
-      # Prepare ccache environment
+      # Configure ccache directory and show stats
       # ---------------------------------------------------------
       - name: Configure ccache
         run: |
@@ -320,8 +306,20 @@ jobs:
           ccache -s || true
 
       # ---------------------------------------------------------
-      # Build with retry logic. Build logs to ../build_full.log
-      # On failure the job continues to the debug steps which upload logs.
+      # Build timestamp: produce date and tag (date + run number)
+      # Outputs: steps.buildstamp.outputs.date and .tag
+      # Example tag: 2025-01-14-r42
+      # ---------------------------------------------------------
+      - name: Generate build timestamp
+        id: buildstamp
+        run: |
+          DATE=$(date -u +"%Y-%m-%d")
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "tag=${DATE}-r${GITHUB_RUN_NUMBER}" >> $GITHUB_OUTPUT
+          echo "Generated build timestamp: ${DATE}-r${GITHUB_RUN_NUMBER}"
+
+      # ---------------------------------------------------------
+      # Build with retry logic. Writes ../build_full.log
       # ---------------------------------------------------------
       - name: Build firmware (with retries)
         id: buildstep
@@ -355,7 +353,7 @@ jobs:
           done
 
       # ---------------------------------------------------------
-      # Collect debug info (always) — small curated set to avoid huge uploads
+      # Collect debug info (always). Curated to avoid huge uploads.
       # ---------------------------------------------------------
       - name: Collect debug info (always)
         if: always()
@@ -363,14 +361,11 @@ jobs:
           TS=$(date -u +"%Y%m%dT%H%M%SZ")
           LOGDIR=".github/workflow-logs/${TS}"
           mkdir -p "${LOGDIR}"
-          # copy main build_full.log if present
           if [ -f ../build_full.log ]; then
             cp ../build_full.log "${LOGDIR}/build_full.log" || true
           fi
-          # collect package build logs (first-level)
           rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/host "${LOGDIR}/" || true
           rsync -a --ignore-missing-args $OPENWRT_DIR/build_dir/package "${LOGDIR}/" || true
-          # small staging_dir snapshot (exclude large packages)
           tar -czf "${LOGDIR}/staging_dir_small.tgz" --exclude='staging_dir/**/pkg' --exclude='staging_dir/toolchain-*/pkg' staging_dir 2>/dev/null || true
           uname -a > "${LOGDIR}/sysinfo.txt" || true
           echo "ccache stats:" > "${LOGDIR}/ccache.txt" || true
@@ -394,31 +389,30 @@ jobs:
             $OPENWRT_DIR/staging_dir/
 
       # ---------------------------------------------------------
-      # Package artifacts and metadata only if build succeeded
+      # Package artifacts and metadata (only on success)
+      # Places artifacts under artifacts/<date>-r<run>/
       # ---------------------------------------------------------
       - name: Package artifacts and metadata
         if: success()
         run: |
           cd $OPENWRT_DIR
-          OUTDIR=../artifacts/${GITHUB_RUN_ID}
-          mkdir -p "$OUTDIR"
+          BUILD_TAG="${{ steps.buildstamp.outputs.tag }}"
+          OUTDIR="../artifacts/${BUILD_TAG}"
+          mkdir -p "${OUTDIR}"
           TARGET="${{ steps.detect.outputs.target || '' }}"
           SUB="${{ steps.detect.outputs.subtarget || '' }}"
           if [ -z "$TARGET" ] || [ -z "$SUB" ]; then
-            # try to detect from bin tree if not available
             if [ -d bin/targets ]; then
               TARGET=$(ls bin/targets | head -n1 || true)
               SUB=$(ls bin/targets/$TARGET | head -n1 || true)
             fi
           fi
-          mkdir -p "$OUTDIR/$TARGET/$SUB"
-          cp -a bin/targets/$TARGET/$SUB/* "$OUTDIR/$TARGET/$SUB/" || true
-          pushd "$OUTDIR/$TARGET/$SUB" >/dev/null 2>&1 || true
-          # generate sha256sums
+          mkdir -p "${OUTDIR}/${TARGET}/${SUB}"
+          cp -a bin/targets/${TARGET}/${SUB}/* "${OUTDIR}/${TARGET}/${SUB}/" || true
+          pushd "${OUTDIR}/${TARGET}/${SUB}" >/dev/null 2>&1 || true
           if ls 2>/dev/null | grep -q .; then
             sha256sum * > sha256sums.txt || true
           fi
-          # split sysupgrade vs factory by filename (best-effort)
           for img in *.bin; do
             [ -f "$img" ] || continue
             if echo "$img" | grep -q "sysupgrade"; then
@@ -430,7 +424,7 @@ jobs:
             fi
           done
           popd >/dev/null 2>&1 || true
-          echo "Artifacts prepared in $OUTDIR"
+          echo "Artifacts prepared in ${OUTDIR}"
 
       # ---------------------------------------------------------
       # Upload built firmware artifacts (only on success)
@@ -441,61 +435,65 @@ jobs:
         with:
           name: firmware-${{ github.run_id }}
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-          path: artifacts/${{ github.run_id }}/
+          path: artifacts/${{ steps.buildstamp.outputs.tag }}
           if-no-files-found: error
 
       # ---------------------------------------------------------
-      # Maintain latest pointer locally (no push) - write to artifact
+      # Create latest snapshot metadata (artifact) - no push
       # ---------------------------------------------------------
       - name: Create latest snapshot metadata (artifact)
         if: success()
         run: |
-          METADIR="../artifacts/${GITHUB_RUN_ID}/meta"
-          mkdir -p "$METADIR"
-          echo "run_id=${GITHUB_RUN_ID}" > "$METADIR/snapshot-latest.txt"
-          date -u +"date=%Y-%m-%dT%H:%M:%SZ" >> "$METADIR/snapshot-latest.txt"
-          echo "profile=${{ steps.detect.outputs.profile || 'unknown' }}" >> "$METADIR/snapshot-latest.txt"
-          echo "target=${{ steps.detect.outputs.target || 'unknown' }}" >> "$METADIR/snapshot-latest.txt"
-          echo "Created metadata in $METADIR"
+          BUILD_TAG="${{ steps.buildstamp.outputs.tag }}"
+          METADIR="../artifacts/${BUILD_TAG}/meta"
+          mkdir -p "${METADIR}"
+          echo "run_id=${GITHUB_RUN_ID}" > "${METADIR}/snapshot-latest.txt"
+          date -u +"date=%Y-%m-%dT%H:%M:%SZ" >> "${METADIR}/snapshot-latest.txt"
+          echo "profile=${{ steps.detect.outputs.profile || 'unknown' }}" >> "${METADIR}/snapshot-latest.txt"
+          echo "target=${{ steps.detect.outputs.target || 'unknown' }}" >> "${METADIR}/snapshot-latest.txt"
+          echo "Wrote metadata to ${METADIR}"
 
       # ---------------------------------------------------------
-      # Create GitHub Release for snapshot builds (attach artifacts)
-      # Note: softprops/action-gh-release attaches files from the runner filesystem.
+      # Create GitHub Release for snapshot builds and attach artifacts
+      # Tag format (chosen Option 3):
+      #   snapshot-<YYYY-MM-DD>-r<run>-<profile>
+      # Where steps.buildstamp.outputs.date is YYYY-MM-DD and
+      # steps.buildstamp.outputs.tag is YYYY-MM-DD-r<run>.
       # ---------------------------------------------------------
       - name: Create GitHub Release (snapshot)
         if: steps.buildtype.outputs.snapshot == 'true' && success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: snapshot-${{ steps.detect.outputs.profile || 'unknown' }}-${{ github.run_id }}
-          name: "Snapshot - ${{ steps.detect.outputs.profile || 'unknown' }} - ${{ github.run_id }}"
+          tag_name: snapshot-${{ steps.buildstamp.outputs.tag }}-${{ steps.detect.outputs.profile || 'unknown' }}
+          name: "Snapshot - ${{ steps.detect.outputs.profile || 'unknown' }} - ${{ steps.buildstamp.outputs.date }} (run ${{ github.run_number }})"
           body: |
             Device: ${{ steps.detect.outputs.profile || 'unknown' }}
             Target: ${{ steps.detect.outputs.target || 'unknown' }}/${{ steps.detect.outputs.subtarget || 'unknown' }}
-            Date (UTC): ${{ now('utc') }}
+            Date (UTC): ${{ steps.buildstamp.outputs.date }}
+            Run number: ${{ github.run_number }}
             WiFi packages: ${{ steps.detect.outputs.wifi || 'none' }}
 
             Changelog:
             ${{ steps.changelog.outputs.log || 'No changelog available.' }}
-          # attach everything under artifacts/<run_id>
           files: |
-            artifacts/${{ github.run_id }}/**
+            artifacts/${{ steps.buildstamp.outputs.tag }}/**
 
       # ---------------------------------------------------------
-      # Prune old artifacts note (no deletion)
+      # Prune old artifacts note (no deletion performed here)
       # ---------------------------------------------------------
       - name: Prune old artifacts (note)
         if: success()
         run: |
-          echo "Pruning not implemented in this workflow (no push perms). Use a separate cleanup workflow if desired."
+          echo "This workflow does not delete old artifacts. Use a separate cleanup workflow or the GitHub API to prune artifacts or releases."
 
       # ---------------------------------------------------------
-      # Final status output
+      # Final summary printed to logs
       # ---------------------------------------------------------
       - name: Summary
         run: |
           echo "Workflow completed for run: ${GITHUB_RUN_ID}"
-          echo "Build snapshot: ${{ steps.buildtype.outputs.snapshot }}"
+          echo "Snapshot build: ${{ steps.buildtype.outputs.snapshot }}"
           echo "Target: ${{ steps.detect.outputs.target || 'unknown' }}"
           echo "Subtarget: ${{ steps.detect.outputs.subtarget || 'unknown' }}"
           echo "Profile: ${{ steps.detect.outputs.profile || 'unknown' }}"
-          echo "Artifacts: artifacts/${GITHUB_RUN_ID}/"
+          echo "Artifacts directory: artifacts/${{ steps.buildstamp.outputs.tag }}"

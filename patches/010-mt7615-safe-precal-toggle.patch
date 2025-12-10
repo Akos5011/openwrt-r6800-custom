@@ -1,0 +1,126 @@
+From: safe-opt <ci@example.com>
+Subject: [PATCH] mt7615: add safe runtime sysfs toggle to clear precal indicator
+
+--- a/package/kernel/mt76/mt7615/eeprom.c
++++ b/package/kernel/mt76/mt7615/eeprom.c
+@@ -1,6 +1,34 @@
+ #include <linux/of.h>
+ #include "mt7615.h"
+ #include "eeprom.h"
++#include <linux/kobject.h>
++#include <linux/sysfs.h>
++#include <linux/moduleparam.h>
++
++/* Safe runtime toggle to clear precal indicator in EEPROM data.
++ * Default: present but disabled until user writes '1' to sysfs node.
++ *
++ * This patch is intentionally conservative: it does NOT change driver
++ * behavior automatically, it only exposes a one-shot toggle that can
++ * be used to force the driver to ignore precal data if you believe
++ * your device ships with stale precal entries. Use it only for testing.
++ */
++static int safe_opt_enable = 1;
++module_param(safe_opt_enable, int, 0444);
++MODULE_PARM_DESC(safe_opt_enable, "Enable mt7615 safe runtime options (sysfs toggles)");
++
++/* Forward declare kobj so we can remove the attribute on unload if needed */
++static struct kobject *mt7615_safe_kobj;
++
++/* Helper: clear a historical precal indicator if the symbol exists */
++static void mt7615_clear_precal_if_present(struct mt7615_dev *dev)
++{
++#ifdef MT_EE_CALDATA_FLASH
++	if (!dev || !dev->mt76.eeprom.data)
++		return;
++
++	/* Clear the lower five bits historically used as precal indicator. */
++	((u8 *)dev->mt76.eeprom.data)[MT_EE_CALDATA_FLASH] &= ~GENMASK(4, 0);
++	dev_info(dev->mt76.dev, "mt7615: cleared precal indicator (runtime request)\n");
++#else
++	/* MT_EE_CALDATA_FLASH not present in this mt76 revision; do nothing. */
++#endif
++}
+ 
+ static int mt7615_efuse_read(struct mt7615_dev *dev, u32 base,
+  			     u16 addr, u8 *data)
+@@
+ 	if (ret && dev->mt76.otp.data) {
+ 		memcpy(dev->mt76.eeprom.data, dev->mt76.otp.data,
+ 		       dev->mt76.otp.size);
+ 	} else {
+ 		dev->flash_eeprom = true;
+ 		mt7615_cal_free_data(dev);
+ 	}
+ 
+ 	mt7615_eeprom_parse_hw_cap(dev);
++
++	/* When safe runtime options are enabled, create a simple sysfs
++	 * toggle so the operator can ask the driver to clear any precal
++	 * indicator found in EEPROM/flash at runtime without rebuilding.
++	 *
++	 * The node name is: /sys/kernel/mt7615-safe/disable_precal
++	 * Write '1' to it to clear precal in memory (one-shot).
++	 */
++	if (safe_opt_enable) {
++		struct kobject *kobj;
++
++		/* Create top-level kobject only once */
++		if (!mt7615_safe_kobj) {
++			kobj = kobject_create_and_add("mt7615-safe", kernel_kobj);
++			if (kobj)
++				mt7615_safe_kobj = kobj;
++		}
++	}
+ }
+ 
++/* sysfs store: write '1' to trigger clearing precal in the first matching dev.
++ * This is intentionally coarse: it targets the first mt7615 device instance
++ * visible in the driver. For multi-device setups you can adapt this later.
++ */
++static ssize_t disable_precal_store(struct kobject *kobj,
++				    struct kobj_attribute *attr,
++				    const char *buf, size_t count)
++{
++	int val = simple_strtol(buf, NULL, 10);
++
++	if (val != 1)
++		return count;
++
++#ifdef MT_EE_CALDATA_FLASH
++	{
++		/* Best-effort: try to find mt76 device list if exported */
++		extern struct list_head mt76_devs_list;
++		struct mt7615_dev *mdev;
++
++		if (!list_empty(&mt76_devs_list)) {
++			list_for_each_entry(mdev, &mt76_devs_list, list) {
++				if (!mdev)
++					continue;
++				mt7615_clear_precal_if_present(mdev);
++				break; /* one-shot */
++			}
++		}
++	}
++#endif
++
++	return count;
++}
++
++static struct kobj_attribute disable_precal_attr =
++	__ATTR(disable_precal, 0200, NULL, disable_precal_store);
++
++static void mt7615_safe_cleanup(void)
++{
++	if (mt7615_safe_kobj) {
++		sysfs_remove_file(mt7615_safe_kobj, &disable_precal_attr.attr);
++		kobject_put(mt7615_safe_kobj);
++		mt7615_safe_kobj = NULL;
++	}
++}
++
++static void mt7615_safe_setup_device(void)
++{
++	if (!mt7615_safe_kobj)
++		return;
++	sysfs_add_file(mt7615_safe_kobj, &disable_precal_attr.attr);
++}

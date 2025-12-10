@@ -45,6 +45,18 @@ jobs:
         run: |
           cp config/.config src/.config
 
+      - name: Install latest mt76
+        run: |
+          cd src/package/kernel
+
+          echo "Removing bundled mt76..."
+          rm -rf mt76
+
+          echo "Cloning freshest mt76..."
+          git clone --depth 1 https://github.com/openwrt/mt76.git
+
+          echo "Replacing mt76 with upstream version:"
+          ls -1 mt76
       # -----------------------------------------
       # Apply patches from patches/
       # (We use ONLY patch -p1 to avoid git identity issues)

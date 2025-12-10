@@ -134,20 +134,6 @@ jobs:
         with:
          path: src/feeds
          key: feed-${{ github.ref }}
-         
-        # ----------------------------------------
-        # TOOLCHAIN + STAGING_DIR CACHE
-        # ----------------------------------------
-      - name: Restore toolchain cache
-        uses: actions/cache@v3
-        with:
-         path: |
-          src/staging_dir
-          src/build_dir/toolchain-*
-         key: toolchain-${{ github.ref_name }}
-         restore-keys: |
-          toolchain-${{ github.ref_name }}
-          toolchain-
 
 
       # -----------------------------------------

@@ -76,8 +76,7 @@ jobs:
          ccache --set-config=compression=true
          ccache --set-config=compression_level=6
          ccache --set-config=sloppiness=locale,time_macros,include_file_mtime
-         echo "CC='ccache gcc'" >> $GITHUB_ENV
-         echo "CXX='ccache g++'" >> $GITHUB_ENV
+         echo "CCACHE=ccache" >> $GITHUB_ENV
          echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
          ccache -s
 

@@ -130,7 +130,7 @@ jobs:
 
       - name: Save feed cache
         if: success()
-        uses: actions/cache@v3
+        uses: actions/cache/save@v3
         with:
          path: src/feeds
          key: feeds-${{ github.ref_name }}

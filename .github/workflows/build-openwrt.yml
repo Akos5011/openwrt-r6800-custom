@@ -1,151 +1,205 @@
-name: Build OpenWrt R6800 (Optimized + Auto-Patches + Custom Config)
+name: Build OpenWrt (Auto + Snapshot)
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
+  schedule:
+    - cron: "0 2 * * *"  # daily snapshot at 02:00 UTC
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-
-    env:
-      OPENWRT_DIR: src
-      CCACHE_DIR: /home/runner/.ccache
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      # ---------------------------------
+      # Checkout repository
+      # ---------------------------------
+      - uses: actions/checkout@v4
 
-    # ------------------------------
-    # Install dependencies
-    # ------------------------------
-    - name: Install build dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y build-essential gcc-multilib g++-multilib \
-          flex bison gawk libncurses-dev libssl-dev python3-distutils \
-          python3-setuptools zlib1g-dev rsync swig unzip wget ccache
+      # ---------------------------------
+      # Detect if this is a snapshot build
+      # ---------------------------------
+      - name: Determine build type
+        id: buildtype
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "snapshot=true" >> $GITHUB_OUTPUT
+            echo "Detected: SNAPSHOT build"
+          else
+            echo "snapshot=false" >> $GITHUB_OUTPUT
+            echo "Detected: NORMAL build"
+          fi
 
-    # ------------------------------
-    # Enable ccache for faster builds
-    # ------------------------------
-    - name: Configure ccache
-      run: |
-        mkdir -p $CCACHE_DIR
-        echo 'export PATH="/usr/lib/ccache:$PATH"' >> $GITHUB_ENV
+      # ---------------------------------
+      # Install required build dependencies
+      # ---------------------------------
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib flex git \
+            libncurses-dev libssl-dev python3-distutils python3-setuptools \
+            zlib1g-dev rsync swig unzip wget ccache
 
-    - name: Restore ccache
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ runner.os }}-${{ hashFiles('patches/**/*.patch') }}
-        restore-keys: ccache-${{ runner.os }}-
+      # ---------------------------------
+      # Clone OpenWrt source tree
+      # ---------------------------------
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth 1 https://github.com/openwrt/openwrt.git src
 
-    # ------------------------------
-    # Clone OpenWrt source
-    # ------------------------------
-    - name: Clone OpenWrt
-      run: |
-        git clone --depth 1 https://github.com/openwrt/openwrt.git $OPENWRT_DIR
+      # ---------------------------------
+      # Copy .config from config/.config
+      # ---------------------------------
+      - name: Apply custom .config
+        run: |
+          cp config/.config src/.config
 
-    # ------------------------------
-    # Apply ALL patches from /patches/ automatically
-    # ------------------------------
-    - name: Apply patches
-      run: |
-        cd $OPENWRT_DIR
-        mkdir -p package/kernel/mt76/patches
-        if [ -d ../patches ]; then
-          echo "Applying patches from ../patches/"
-          cp ../patches/*.patch package/kernel/mt76/patches/ || true
-        else
-          echo "No patches/ folder found — skipping."
-        fi
+      # ---------------------------------
+      # Apply all patches from patches/
+      # ---------------------------------
+      - name: Apply patches
+        run: |
+          cd src
+          for p in ../patches/*.patch; do
+            [ -f "$p" ] || continue
+            echo "Applying $p"
+            patch -p1 < "$p"
+          done
 
-    # ------------------------------
-    # Update + install feeds
-    # ------------------------------
-    - name: Update feeds
-      run: |
-        cd $OPENWRT_DIR
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      # ---------------------------------
+      # Update and install feeds
+      # ---------------------------------
+      - name: Update feeds
+        run: |
+          cd src
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    # ------------------------------
-    # Copy custom .config from /config/.config
-    # ------------------------------
-    - name: Load custom configuration
-      run: |
-        cd $OPENWRT_DIR
-        if [ -f ../config/.config ]; then
-          echo "Using custom .config from /config/.config"
-          cp ../config/.config .config
-        else
-          echo "NO custom /config/.config found!"
-          exit 1
-        fi
+      # ---------------------------------
+      # Finalize config after feeds
+      # ---------------------------------
+      - name: defconfig
+        run: |
+          cd src
+          make defconfig
 
-        # Expand config
-        make defconfig
+      # ---------------------------------
+      # Detect target / subtarget automatically
+      # ---------------------------------
+      - name: Detect target
+        id: detect_target
+        run: |
+          TARGET=$(grep "^CONFIG_TARGET_[^_]*=y" src/.config | sed 's/CONFIG_TARGET_//;s/=y//')
+          SUBTARGET=$(grep "^CONFIG_TARGET_${TARGET}_.*=y" src/.config | sed "s/CONFIG_TARGET_${TARGET}_//;s/=y//")
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
+          echo "Detected Target: $TARGET / $SUBTARGET"
 
-    # ------------------------------
-    # Build firmware
-    # ------------------------------
-    - name: Build firmware
-      run: |
-        cd $OPENWRT_DIR
-        make -s -j$(nproc) V=s
+      # ---------------------------------
+      # Auto-detect device profile
+      # ---------------------------------
+      - name: Detect profile
+        id: detect_profile
+        run: |
+          PROFILE=$(grep "^CONFIG_TARGET_.*_DEVICE_.*=y" src/.config | sed 's/.*DEVICE_//;s/=y//')
+          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+          echo "Detected profile: $PROFILE"
 
-    # ------------------------------
-    # Show all build output files (debug)
-    # ------------------------------
-    - name: List output tree
-      run: |
-        find $OPENWRT_DIR/bin/targets -type f
+      # ---------------------------------
+      # Detect WiFi packages
+      # ---------------------------------
+      - name: Detect WiFi drivers
+        id: wifi
+        run: |
+          WIFI=$(grep -E "CONFIG_PACKAGE_(iw|iwinfo|hostapd|wpad|mt76|ath10k|ath9k)=y" src/.config || true)
+          WIFI_LIST=$(echo "$WIFI" | sed 's/CONFIG_PACKAGE_//g;s/=y//g' | tr '\n' ' ')
+          echo "wifi=$WIFI_LIST" >> $GITHUB_OUTPUT
+          echo "WiFi detected: $WIFI_LIST"
 
-    # ------------------------------
-    # Upload build artifacts
-    # ------------------------------
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-r6800-${{ github.sha }}-${{ github.run_number }}
-        path: |
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.bin
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.manifest
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.buildinfo
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.sha256sums
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.packages
-        if-no-files-found: error
+      # ---------------------------------
+      # Generate changelog (between last 2 commits)
+      # ---------------------------------
+      - name: Generate changelog
+        id: changelog
+        run: |
+          git fetch --depth=20 origin main
+          PREV=$(git rev-parse HEAD~1 || echo "INITIAL")
+          CURRENT=$(git rev-parse HEAD)
+          if [ "$PREV" = "INITIAL" ]; then
+            echo "First build" > changelog.txt
+          else
+            git log --pretty=format:"%h - %s" $PREV..$CURRENT > changelog.txt
+          fi
+          echo "log<<EOF" >> $GITHUB_OUTPUT
+          cat changelog.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-    # ------------------------------
-    # Create GitHub Release with firmware
-    # ------------------------------
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      if: startsWith(github.ref, 'refs/heads/main')
-      with:
-        tag_name: r6800-${{ github.run_number }}
-        name: OpenWrt R6800 – Build #${{ github.run_number }}
-        body: |
-          Automated OpenWrt build for Netgear R6800  
-          Commit: `${{ github.sha }}`  
-          Includes ALL patches from /patches/  
-          Uses custom config: /config/.config  
-          ccache enabled, LTO optimization, GCC improvements  
-        files: |
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.bin
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.manifest
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.buildinfo
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.sha256sums
-          ${{ env.OPENWRT_DIR }}/bin/targets/**/*.packages
+      # ---------------------------------
+      # Print full directory tree before build
+      # ---------------------------------
+      - name: Show directory structure
+        run: |
+          find src | head -n 200
 
-    # ------------------------------
-    # Save ccache
-    # ------------------------------
-    - name: Save updated ccache
-      if: always()
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ runner.os }}-${{ hashFiles('patches/**/*.patch') }}
+      # ---------------------------------
+      # Export ccache + speed flags
+      # ---------------------------------
+      - name: Optimize build
+        run: |
+          echo "export CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          echo "export CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
+          echo "export MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
+
+      # ---------------------------------
+      # Build OpenWrt
+      # ---------------------------------
+      - name: Build firmware
+        run: |
+          cd src
+          make -j$(nproc) V=sc
+        continue-on-error: true
+
+      # ---------------------------------
+      # Upload build logs on failure
+      # ---------------------------------
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: src/logs/
+
+      # ---------------------------------
+      # Upload compiled firmware
+      # ---------------------------------
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ steps.detect_profile.outputs.profile }}-${{ steps.detect_target.outputs.target }}-${{ steps.detect_target.outputs.subtarget }}${{ steps.buildtype.outputs.snapshot == 'true' && '-snapshot' || '' }}
+          path: src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/
+          if-no-files-found: error
+
+      # ---------------------------------
+      # Create GitHub Release (SNAPSHOT ONLY)
+      # ---------------------------------
+      - name: Create GitHub Release
+        if: steps.buildtype.outputs.snapshot == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: snapshot-${{ steps.detect_profile.outputs.profile }}-${{ github.run_id }}
+          name: "Snapshot Build - ${{ steps.detect_profile.outputs.profile }} - $(date +'%Y-%m-%d')"
+          body: |
+            ## Snapshot Build
+            **Device:** ${{ steps.detect_profile.outputs.profile }}
+            **Target:** ${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}
+            **Date:** $(date -u +"%Y-%m-%d %H:%M UTC")
+
+            ### WiFi Packages
+            ${{ steps.wifi.outputs.wifi }}
+
+            ### Changelog
+            ${{ steps.changelog.outputs.log }}
+
+          files: |
+            src/bin/targets/${{ steps.detect_target.outputs.target }}/${{ steps.detect_target.outputs.subtarget }}/*

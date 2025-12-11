@@ -1,31 +1,28 @@
 From 0123456789abcdef Mon Sep 17 00:00:00 2001
 From: ChatGPT <noreply@example.com>
 Date: Thu, 11 Dec 2025 12:00:00 +0000
-Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 performance testing
+Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 (OpenWrt path fix)
 
 ---
- drivers/net/wireless/mediatek/mt76/mt7615/Makefile      |  2 +-
- drivers/net/wireless/mediatek/mt76/mt7615/mt7615_tuning.c | 98 +++++++++++++++++++++++++++
+ package/kernel/mt76/mt7615/Makefile              |  2 +-
+ package/kernel/mt76/mt7615/mt7615_tuning.c       | 98 +++++++++++++++++++++++++++
  2 files changed, 99 insertions(+), 1 deletion(-)
- create mode 100644 drivers/net/wireless/mediatek/mt76/mt7615/mt7615_tuning.c
+ create mode 100644 package/kernel/mt76/mt7615/mt7615_tuning.c
 
---- a/drivers/net/wireless/mediatek/mt76/mt7615/Makefile
-+++ b/drivers/net/wireless/mediatek/mt76/mt7615/Makefile
+--- a/package/kernel/mt76/mt7615/Makefile
++++ b/package/kernel/mt76/mt7615/Makefile
 @@ -1,4 +1,4 @@
 -obj-$(CONFIG_MT7615) += mt7615.o
 +obj-$(CONFIG_MT7615) += mt7615.o mt7615_tuning.o
 
 --- /dev/null
-+++ b/drivers/net/wireless/mediatek/mt76/mt7615/mt7615_tuning.c
++++ b/package/kernel/mt76/mt7615/mt7615_tuning.c
 @@ -0,0 +1,98 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#include <linux/module.h>
 +#include <linux/kernel.h>
 +
-+/* Runtime‑adjustable knobs for performance experiments.
-+ * Nothing here changes hardware by itself; other driver files may read
-+ * these module parameters to override defaults.
-+ */
++/* Runtime-adjustable knobs for performance experiments. */
 +
 +int tx_ring_size = 1024;
 +module_param(tx_ring_size, int, 0444);
@@ -57,8 +54,7 @@ Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 performance testing
 +
 +static int __init mt7615_tuning_init(void)
 +{
-+    pr_info("mt7615_tuning: loaded (tx_ring=%d rx_ring=%d amsdu=%d amsdu_in_agg=%d napi=%d qlen=%d)
-",
++    pr_info("mt7615_tuning: loaded (tx_ring=%d rx_ring=%d amsdu=%d amsdu_in_agg=%d napi=%d qlen=%d)\n",
 +            tx_ring_size, rx_ring_size, enable_amsdu,
 +            enable_amsdu_in_agg, napi_weight, tx_queue_len);
 +    return 0;
@@ -66,8 +62,7 @@ Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 performance testing
 +
 +static void __exit mt7615_tuning_exit(void)
 +{
-+    pr_info("mt7615_tuning: unloaded
-");
++    pr_info("mt7615_tuning: unloaded\n");
 +}
 +
 +module_init(mt7615_tuning_init);

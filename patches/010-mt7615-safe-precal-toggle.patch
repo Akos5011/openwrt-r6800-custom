@@ -38,7 +38,7 @@ Subject: [PATCH] mt7615: add safe runtime sysfs toggle to clear precal indicator
 +	dev_info(dev->mt76.dev, "mt7615: cleared precal indicator (runtime request)\n");
 +#else
 +	/* MT_EE_CALDATA_FLASH not present in this mt76 revision; do nothing. */
-+#endif
++#end
 +}
  
  static int mt7615_efuse_read(struct mt7615_dev *dev, u32 base,

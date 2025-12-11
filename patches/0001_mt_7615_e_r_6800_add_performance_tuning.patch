@@ -54,7 +54,8 @@ Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 (OpenWrt path fix)
 +
 +static int __init mt7615_tuning_init(void)
 +{
-+    pr_info("mt7615_tuning: loaded (tx_ring=%d rx_ring=%d amsdu=%d amsdu_in_agg=%d napi=%d qlen=%d)\n",
++    pr_info("mt7615_tuning: loaded (tx_ring=%d rx_ring=%d amsdu=%d amsdu_in_agg=%d napi=%d qlen=%d)
+",
 +            tx_ring_size, rx_ring_size, enable_amsdu,
 +            enable_amsdu_in_agg, napi_weight, tx_queue_len);
 +    return 0;
@@ -62,7 +63,8 @@ Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 (OpenWrt path fix)
 +
 +static void __exit mt7615_tuning_exit(void)
 +{
-+    pr_info("mt7615_tuning: unloaded\n");
++    pr_info("mt7615_tuning: unloaded
+");
 +}
 +
 +module_init(mt7615_tuning_init);
@@ -71,3 +73,43 @@ Subject: [PATCH] mt7615e: add runtime tuning knobs for R6800 (OpenWrt path fix)
 +MODULE_AUTHOR("ChatGPT");
 +MODULE_DESCRIPTION("Runtime tuning knobs for mt7615e (R6800)");
 +MODULE_LICENSE("GPL");
++
++
++--- a/package/kernel/mt76/mt7615/init.c
++++ b/package/kernel/mt76/mt7615/init.c
+@@
+ #include "mt7615.h"
+ #include "mac.h"
+ #include "mcu.h"
+ #include "eeprom.h"
++
++/* tuning knobs exposed by mt7615_tuning.c */
++extern int tx_ring_size;
++extern int rx_ring_size;
++extern int enable_amsdu;
++extern int enable_amsdu_in_agg;
++extern int napi_weight;
++extern int tx_queue_len;
++extern int debug_tuning;
+@@
+-    ret = mt76_register_phy(mphy, true, mt76_rates,
+-                ARRAY_SIZE(mt76_rates));
+-    if (ret)
+-        ieee80211_free_hw(mphy->hw);
+-
+-    return ret;
++    ret = mt76_register_phy(mphy, true, mt76_rates,
++                ARRAY_SIZE(mt76_rates));
++    if (ret)
++        ieee80211_free_hw(mphy->hw);
++
++    /* Announce tuning values so users can confirm they are visible */
++    if (!ret) {
++        pr_info("mt7615_tuning: register_ext_phy applied: tx_ring=%d rx_ring=%d amsdu=%d amsdu_in_agg=%d napi=%d tx_qlen=%d
+",
++                tx_ring_size, rx_ring_size, enable_amsdu,
++                enable_amsdu_in_agg, napi_weight, tx_queue_len);
++    }
++
++    return ret;
+*** End Patch

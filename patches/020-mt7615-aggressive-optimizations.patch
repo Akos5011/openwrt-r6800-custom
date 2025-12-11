@@ -1,129 +1,33 @@
-From: aggr-opt <ci@example.com>
-Subject: [PATCH] mt7615: add optional aggressive runtime optimizations (bypass precal, DPD, increase power bounds)
-
---- a/package/kernel/mt76/mt7615/init.c
-+++ b/package/kernel/mt76/mt7615/init.c
-@@ -1,6 +1,44 @@
-  #include "mac.h"
-  #include "mcu.h"
-  #include "eeprom.h"
-+#include <linux/moduleparam.h>
-+#include <linux/kobject.h>
-+#include <linux/sysfs.h>
-+
-+/* Aggressive optimization: disabled by default. When enabled:
-+ *  - clear precal indicator
-+ *  - bypass TSSI/EEPROM enforced TXpower tables
-+ *  - attempt to disable DPD where present (best-effort)
-+ *  - relax tx power clamp by a safe margin
-+ *  - enable a couple of throughput-friendly runtime knobs
-+ *
-+ * WARNING: aggressive mode is risky. Default is 0 (off). Enable only
-+ * for testing on devices where you can revert easily.
-+ */
-+static int mt7615_aggressive = 0;
-+module_param(mt7615_aggressive, int, 0644);
-+MODULE_PARM_DESC(mt7615_aggressive, "Enable aggressive mt7615 runtime optimizations (0=off,1=on)");
-+
-+static struct kobject *mt7615_aggr_kobj;
-+
-+static ssize_t mt7615_aggr_store(struct kobject *kobj,
-+				 struct kobj_attribute *attr,
-+				 const char *buf, size_t count)
-+{
-+	int v = simple_strtol(buf, NULL, 10);
-+	mt7615_aggressive = v ? 1 : 0;
-+
-+	/* if enabling, try to perform runtime aggressive actions now (best-effort) */
-+	if (mt7615_aggressive) {
-+		dev_info(NULL, "mt7615: aggressive optimizations enabled (runtime)\n");
-+		/* driver instance-specific actions will run in probe/init path */
-+	}
-+	return count;
-+}
-+
-+static struct kobj_attribute mt7615_aggr_attr =
-+	__ATTR(enable, 0600, NULL, mt7615_aggr_store);
-+
-+static void mt7615_install_aggr_sysfs(void)
-+{
-+	if (!mt7615_aggr_kobj) {
-+		mt7615_aggr_kobj = kobject_create_and_add("mt7615-aggr", kernel_kobj);
-+		if (mt7615_aggr_kobj)
-+			sysfs_add_file(mt7615_aggr_kobj, &mt7615_aggr_attr.attr);
-+	}
-+}
-+
-+static void mt7615_remove_aggr_sysfs(void)
-+{
-+	if (mt7615_aggr_kobj) {
-+		sysfs_remove_file(mt7615_aggr_kobj, &mt7615_aggr_attr.attr);
-+		kobject_put(mt7615_aggr_kobj);
-+		mt7615_aggr_kobj = NULL;
-+	}
-+}
- 
- static int mt7615_init_txpower(struct mt7615_dev *dev)
- {
-+	/* If aggressive mode enabled, we will skip EEPROM/TSSI enforced tables
-+	 * and prefer runtime limits. We also attempt to relax limits slightly.
-+	 * All changes are guarded with #ifdefs and presence checks.
-+	 */
-+	if (mt7615_aggressive) {
-+#ifdef MT_EE_CALDATA_FLASH
-+		if (dev && dev->mt76.eeprom.data) {
-+			u8 *ee = (u8 *)dev->mt76.eeprom.data;
-+			ee[MT_EE_CALDATA_FLASH] &= ~GENMASK(4, 0);
-+			dev_info(dev->mt76.dev, "mt7615: aggressive mode cleared precal indicator\n");
-+		}
-+#endif
-+		/* Attempt to disable DPD flags if present (best-effort). Many
-+		 * mt76 revisions expose DPD controls in MCU or mcu ops; we try a
-+		 * non-invasive approach: check for function pointers or macros.
-+		 */
-+#ifdef MT7615_HAVE_DPD_CONTROL
-+		if (dev && dev->dpd) {
-+			dev->dpd->enabled = 0;
-+			dev_info(dev->mt76.dev, "mt7615: aggressive mode disabled DPD (best-effort)\n");
-+		}
-+#endif
-+	}
- 
--	/* existing function body continues unchanged */
-+	/* existing function body continues unchanged (original code) */
- }
+--- a/mt7615/init.c
++++ b/mt7615/init.c
 @@
- static void mt7615_phy_init(struct mt7615_dev *dev)
- {
-+	/* Apply runtime high-throughput friendly tuning when aggressive is on.
-+	 * These are safe-ish: increase max AMPDU length, prefer high aggregation,
-+	 * lower watchdog thresholds. All guarded by symbol checks.
-+	 */
-+	if (mt7615_aggressive) {
-+#ifdef MT76_PHY_ADJUST_AGGREGATION
-+		dev->mt76.agg.max_ampdu_len = min(dev->mt76.agg.max_ampdu_len * 2, 0xFFFF);
-+		dev_info(dev->mt76.dev, "mt7615: aggressive increased AMPDU limit\n");
-+#endif
+-/* Original init settings */
+-priv->mcu_calibrate = true;
++/* Aggressive: disable precalibration and force fast init */
++priv->mcu_calibrate = false;
++priv->mcu_fast_init = true;
+
+--- a/mt7615/phy.c
++++ b/mt7615/phy.c
+@@
+-/* Original default TX power */
+-priv->tx_power = MT_TX_PWR_DEFAULT;
++/* Aggressive: max TX power for best signal */
++priv->tx_power = MT_TX_PWR_MAX;
+
+--- a/mt7615/mac.c
++++ b/mt7615/mac.c
+@@
+-/* Original aggregation settings */
+-priv->agg_tx = true;
++/* Aggressive: maximize aggregation and reduce spacing */
++priv->agg_tx = true;
++priv->ampdu_max_len = 256; /* max A-MPDU size */
++priv->ampdu_min_spacing = 2; /* minimal spacing */
 +
-+#ifdef MT76_TX_POWER_CLAMP
-+		/* increase clamp by +2 dB where safe — driver still uses regulatory limits */
-+		dev->mt76.tx_power_clamp = min(dev->mt76.tx_power_clamp + 2, 40);
-+		dev_info(dev->mt76.dev, "mt7615: aggressive increase tx power clamp (best-effort)\n");
-+#endif
-+	}
- 
- 	/* original phy init continues */
- }
- 
-+/* hook to install sysfs on module load / probe if possible */
-+static void mt7615_aggr_setup_probe(struct mt7615_dev *dev)
-+{
-+	if (mt7615_aggressive)
-+		mt7615_install_aggr_sysfs();
-+}
++/* Enable aggressive rate control */
++priv->aggr_rate_control = true;
 +
-+/* Expose a weak symbol or call from probe if probe path available.
-+ * The ideal place to call mt7615_aggr_setup_probe is at the end of the probe
-+ * or initialization path where `dev` is known. This patch adds helpers;
-+ * integration point may require adding a small call in probe (one-line).
-+ */
++/* Increase RX buffer sizes for high throughput */
++priv->rx_ring_size = 2048;
++priv->tx_ring_size = 2048;

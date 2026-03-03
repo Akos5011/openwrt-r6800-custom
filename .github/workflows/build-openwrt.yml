@@ -54,6 +54,10 @@ jobs:
           # Disable A-MSDU offloading to prevent jitter and 'micro-crashes'
           find src/ -type f -name "mmio.c" | xargs -r sed -i 's/MT_DRV_AMSDU_OFFLOAD,//g'
           
+          # Align EEPROM logic with the physical 3-antenna board
+          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_EE_NIC_CONF_0_RX_PATH 4/MT_EE_NIC_CONF_0_RX_PATH 3/g'
+          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_EE_NIC_CONF_0_TX_PATH 4/MT_EE_NIC_CONF_0_TX_PATH 3/g'
+          
           if [ -d "patches" ]; then
             echo "Applying custom patches..."
             cp -r patches/* src/target/linux/ramips/patches-5.15/ 2>/dev/null || true
@@ -89,7 +93,8 @@ jobs:
           echo "CONFIG_RPS=y" >> .config
           echo "CONFIG_XPS=y" >> .config
           echo "CONFIG_LOGIRQLOG=n" >> .config
-          echo "net.core.default_qdisc=cake" >> package/base-files/files/etc/sysctl.conf
+          echo "CONFIG_PACKAGE_kmod-sched-fq=y" >> .config
+          echo "net.core.default_qdisc=fq" >> package/base-files/files/etc/sysctl.conf
           echo "net.core.rmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
           echo "net.core.wmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
           

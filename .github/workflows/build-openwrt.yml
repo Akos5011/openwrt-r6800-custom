@@ -200,8 +200,9 @@ jobs:
           # Aktiváljuk, de a kontroll az SQM-nél marad
           echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
           echo "CONFIG_PACKAGE_kmod-mt7615-firmware=y" >> .config
+          mkdir -p package/base-files/files/etc/modules.d
           echo "options mt7615e beamforming=1" > package/base-files/files/etc/modules.d/mt7615e
-          echo "options mt7615e vht_beamformer=1 vht_beamformee=1" > package/base-files/files/etc/modules.d/mt7615e
+          echo "options mt7615e vht_beamformer=1 vht_beamformee=1" >> package/base-files/files/etc/modules.d/mt7615e
 
           # 25. THE FINAL SEAL - SOFTIRQ & NET STACK TUNING
           # Növeljük a CPU "étvágyát" a hálózati csomagokhoz

@@ -31,14 +31,15 @@ jobs:
 
       - name: 0x7 & Patches
         run:  |
-          echo "Keresem és javítom az mt7615 forrásokat..."
-          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/antenna_mask = 0xf/antenna_mask = 0x7/g'
-          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/chainmask = 0xf/chainmask = 0x7/g'
-          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/0xF/0x7/g'
+          echo "mt7615 3-antenna fix loading..."
+          # Target antenna_mask, chainmask, and rx_chainmask with case-insensitivity
+          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/\(antenna_mask\|chainmask\|rx_chainmask\) = 0x[fF]/\1 = 0x7/g'
+          
+          # Final catch-all for any missed 0xF defines in the radio-specific files
+          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/0x[fF]/0x7/g'
 
-          # Egyedi patchek behúzása a mappádból (ha van benne valami)
           if [ -d "patches" ]; then
-            echo "Saját patchek alkalmazása..."
+            echo "Applying custom patches..."
             cp -r patches/* src/target/linux/ramips/patches-5.15/ 2>/dev/null || true
             cp -r patches/* src/package/kernel/mt76/patches/ 2>/dev/null || true
           fi
@@ -52,6 +53,8 @@ jobs:
           sed -i 's/CONFIG_HZ_100=y/# CONFIG_HZ_100 is not set/' .config
           echo "CONFIG_HZ_1000=y" >> .config
           echo "CONFIG_HZ=1000" >> .config
+          echo "CONFIG_PACKAGE_ethtool=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
 
           # 2. DNS: DNS Cache Boost
           sed -i 's/cachesize=150/cachesize=1000/' package/network/services/dnsmasq/files/dnsmasq.conf
@@ -73,8 +76,10 @@ jobs:
           echo "net.core.wmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
           
           # 5. ENTROPY & FASTOPEN (Hogy ne várjon a titkosításra)
-          echo "CONFIG_PACKAGE_haveged=y" >> .config
           echo "net.ipv4.tcp_fastopen=3" >> package/base-files/files/etc/sysctl.conf
+          # Force MSS Clamping so PPPoE doesn't fragment your audio packets
+          echo "net.ipv4.tcp_mtu_probing=1" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_base_mss=1024" >> package/base-files/files/etc/sysctl.conf
           
           # 7. IRQ & CPU STEERING (Minden szál maxon)
           echo "echo f > /sys/class/net/eth0/queues/rx-0/rps_cpus" >> package/base-files/files/etc/rc.local
@@ -88,6 +93,7 @@ jobs:
           echo "CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y" >> .config
           
           # 10. SUBOTICA AUDIO-LATENCY FIX (A 16kHz-es tiszta jelért)
+          echo "net.ipv4.tcp_low_latency=1" >> package/base-files/files/etc/sysctl.conf
           echo "net.core.busy_poll=50" >> package/base-files/files/etc/sysctl.conf
           echo "net.core.busy_read=50" >> package/base-files/files/etc/sysctl.conf
 
@@ -109,8 +115,7 @@ jobs:
           echo "vm.compact_unevictable_allowed=1" >> package/base-files/files/etc/sysctl.conf
           echo "vm.extfrag_threshold=500" >> package/base-files/files/etc/sysctl.conf
 
-          # 17. NETWORK BACKLOG & FRAG (A sávszélesség-tartalék)
-          echo "net.core.netdev_max_backlog=5000" >> package/base-files/files/etc/sysctl.conf
+          # 17. FRAG (A sávszélesség-tartalék)
           echo "net.ipv4.ipfrag_high_thresh=4194304" >> package/base-files/files/etc/sysctl.conf
 
           # 19. ARP CACHE BOOST (Azonnali eszközfelismerés)
@@ -125,7 +130,7 @@ jobs:
           echo "net.ipv4.udp_rmem_min=16384" >> package/base-files/files/etc/sysctl.conf
           echo "net.ipv4.udp_wmem_min=16384" >> package/base-files/files/etc/sysctl.conf
 
-                    # 22. NO POWER SAVE (Wi-Fi & Ethernet)
+          # 22. NO POWER SAVE (Wi-Fi & Ethernet)
           # Kikapcsoljuk a Wi-Fi és a LAN alvó módjait
           echo "iw dev wlan0 set power_save off" >> package/base-files/files/etc/rc.local
           echo "iw dev wlan1 set power_save off" >> package/base-files/files/etc/rc.local
@@ -151,13 +156,6 @@ jobs:
           echo "net.ipv4.tcp_ecn=1" >> package/base-files/files/etc/sysctl.conf
           echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
           
-          # 26. THE SUBOTICA FINAL LOCK-IN
-          # Kényszerítjük az összes hálózati interfészt a többmagos módra (RPS)
-          echo "for x in /sys/class/net/*/queues/rx-0/rps_cpus; do echo f > \$x; done" >> package/base-files/files/etc/rc.local
-          
-          # Hogy a 16kHz-es audio teszted (Malena) soha ne akadjon meg:
-          echo "net.core.netdev_max_backlog=10000" >> package/base-files/files/etc/sysctl.conf
-        
       - name: Run defconfig & Safety Check
         run: |
           cd src
@@ -173,6 +171,6 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: OpenWrt-R6800-Ghostbuster
+          name: OpenWrt-R6800
           path: src/bin/targets/ramips/mt7621/
           

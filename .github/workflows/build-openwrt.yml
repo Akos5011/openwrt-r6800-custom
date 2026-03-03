@@ -45,6 +45,9 @@ jobs:
           # Force driver to prioritize 80MHz/VHT bandwidth over neighbor 'noise'
           find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_HT_BSS_COEX_TGT_THRESHOLD 10/MT_HT_BSS_COEX_TGT_THRESHOLD 0/g'
           
+          # Stop the driver from 'stepping back' for neighboring noise
+          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_HT_BSS_COEX_PERIOD 60/MT_HT_BSS_COEX_PERIOD 0/g'
+          
           # Fix for older hardware dropping after rekeying
           find src/ -type f -name "init.c" | xargs -r sed -i 's/dev->mt76.gtk_offload = true/dev->mt76.gtk_offload = false/g'
           
@@ -98,11 +101,14 @@ jobs:
           
           # 7. IRQ & CPU STEERING (Minden szál maxon)
           echo "echo 32768 > /proc/sys/net/core/netdev_max_backlog" >> package/base-files/files/etc/sysctl.conf
+          
+          # Enable Threaded IRQs for ultra-stable packet delivery
+          echo "kernel.threaded_irqs=1" >> package/base-files/files/etc/sysctl.conf
 
           # 8. NO-ATIME & FLASH OPTIMIZATION (Hogy ne lassuljon a rendszer)
           sed -i 's/defaults/noatime,nodiratime/g' package/base-files/files/lib/functions/uci-defaults.sh
           
-          # 10. SUBOTICA AUDIO-LATENCY FIX (A 16kHz-es tiszta jelért)
+          # 10. AUDIO-LATENCY FIX (A 16kHz-es tiszta jelért)
           echo "net.ipv4.tcp_low_latency=1" >> package/base-files/files/etc/sysctl.conf
           echo "net.core.busy_poll=50" >> package/base-files/files/etc/sysctl.conf
           echo "net.core.busy_read=50" >> package/base-files/files/etc/sysctl.conf
@@ -119,6 +125,10 @@ jobs:
           # 16. RAM COMPACTION (A 256MB kimaxolása)
           echo "vm.compact_unevictable_allowed=1" >> package/base-files/files/etc/sysctl.conf
           echo "vm.extfrag_threshold=500" >> package/base-files/files/etc/sysctl.conf
+          
+          # Instant reboot on failure to protect hardware from 'stuck' states
+          echo "vm.panic_on_oom=1" >> package/base-files/files/etc/sysctl.conf
+          echo "kernel.panic=10" >> package/base-files/files/etc/sysctl.conf
 
           # 17. FRAG (A sávszélesség-tartalék)
           echo "net.ipv4.ipfrag_high_thresh=4194304" >> package/base-files/files/etc/sysctl.conf

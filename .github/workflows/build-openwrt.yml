@@ -55,6 +55,9 @@ jobs:
           echo "CONFIG_HZ=1000" >> .config
           echo "CONFIG_PACKAGE_ethtool=y" >> .config
           echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
+          echo "sleep 5" >> package/base-files/files/etc/rc.local
+          echo "vm.dirty_ratio=10" >> package/base-files/files/etc/sysctl.conf
+          echo "vm.dirty_background_ratio=5" >> package/base-files/files/etc/sysctl.conf
 
           # 2. DNS: DNS Cache Boost
           sed -i 's/cachesize=150/cachesize=1000/' package/network/services/dnsmasq/files/dnsmasq.conf
@@ -82,7 +85,6 @@ jobs:
           echo "net.ipv4.tcp_base_mss=1024" >> package/base-files/files/etc/sysctl.conf
           
           # 7. IRQ & CPU STEERING (Minden szál maxon)
-          echo "echo f > /sys/class/net/eth0/queues/rx-0/rps_cpus" >> package/base-files/files/etc/rc.local
           echo "echo 32768 > /proc/sys/net/core/netdev_max_backlog" >> package/base-files/files/etc/sysctl.conf
 
           # 8. NO-ATIME & FLASH OPTIMIZATION (Hogy ne lassuljon a rendszer)
@@ -102,15 +104,10 @@ jobs:
           echo "net.ipv4.tcp_window_scaling=1" >> package/base-files/files/etc/sysctl.conf
           echo "net.ipv4.tcp_timestamps=1" >> package/base-files/files/etc/sysctl.conf
 
-          # 12. IRQ COALESCING (Hogy ne várjon a hálózati kártya)
-          # Ezt az rc.local-ba tesszük, hogy indításkor élesedjen
-          echo "ethtool -C eth0 rx-usecs 0 tx-usecs 0" >> package/base-files/files/etc/rc.local
-
           # 15. CPU LATENCY TUNING (Nincs alvás, csak 1000MHz)
           echo "kernel.sched_min_granularity_ns=1000000" >> package/base-files/files/etc/sysctl.conf
           echo "kernel.sched_wakeup_granularity_ns=2000000" >> package/base-files/files/etc/sysctl.conf
-          echo "echo 0 > /sys/module/cpuidle/parameters/off" >> package/base-files/files/etc/rc.local
-
+          
           # 16. RAM COMPACTION (A 256MB kimaxolása)
           echo "vm.compact_unevictable_allowed=1" >> package/base-files/files/etc/sysctl.conf
           echo "vm.extfrag_threshold=500" >> package/base-files/files/etc/sysctl.conf
@@ -129,12 +126,6 @@ jobs:
           # 21. UDP STREAMS FOR "MALENA" (Audio-vizuális stabilitás)
           echo "net.ipv4.udp_rmem_min=16384" >> package/base-files/files/etc/sysctl.conf
           echo "net.ipv4.udp_wmem_min=16384" >> package/base-files/files/etc/sysctl.conf
-
-          # 22. NO POWER SAVE (Wi-Fi & Ethernet)
-          # Kikapcsoljuk a Wi-Fi és a LAN alvó módjait
-          echo "iw dev wlan0 set power_save off" >> package/base-files/files/etc/rc.local
-          echo "iw dev wlan1 set power_save off" >> package/base-files/files/etc/rc.local
-          echo "ethtool -s eth0 wol d" >> package/base-files/files/etc/rc.local
 
           # 23. TCP EXTREME CONFIG (A sávszélesség-prés vége)
           echo "net.ipv4.tcp_fastopen=3" >> package/base-files/files/etc/sysctl.conf
@@ -155,6 +146,15 @@ jobs:
           # Hogy ne legyen "micro-stutter" a hálózaton
           echo "net.ipv4.tcp_ecn=1" >> package/base-files/files/etc/sysctl.conf
           echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
+          echo "echo f > /sys/class/net/eth0/queues/rx-0/rps_cpus" >> package/base-files/files/etc/rc.local
+          # Kikapcsoljuk a Wi-Fi és a LAN alvó módjait
+          echo "iw dev wlan0 set power_save off" >> package/base-files/files/etc/rc.local
+          echo "iw dev wlan1 set power_save off" >> package/base-files/files/etc/rc.local
+          echo "ethtool -s eth0 wol d" >> package/base-files/files/etc/rc.local
+          echo "echo 0 > /sys/module/cpuidle/parameters/off" >> package/base-files/files/etc/rc.local
+          # IRQ COALESCING (Hogy ne várjon a hálózati kártya)
+          # Ezt az rc.local-ba tesszük, hogy indításkor élesedjen
+          echo "ethtool -C eth0 rx-usecs 0 tx-usecs 0" >> package/base-files/files/etc/rc.local
           
       - name: Run defconfig & Safety Check
         run: |

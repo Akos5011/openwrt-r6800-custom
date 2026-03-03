@@ -1,191 +1,66 @@
-name: Build OpenWrt for R6800
+name: Build OpenWrt for R6800 - Ghostbuster Edition
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *"   # nightly snapshot
+    - cron: "0 0 * * *"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 720
-
     steps:
-      # -----------------------------------------
-      # Fetch repository
-      # -----------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -----------------------------------------
-      # Required build dependencies
-      # -----------------------------------------
-      - name: Install required build dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y \
-            build-essential gcc-multilib g++-multilib \
-            flex bison gawk libncurses-dev libssl-dev \
-            python3-distutils python3-setuptools \
-            zlib1g-dev swig rsync unzip wget ccache patch
+          sudo apt install -y build-essential gcc-multilib g++-multilib flex bison gawk libncurses-dev libssl-dev python3-distutils python3-setuptools zlib1g-dev swig rsync unzip wget ccache patch
 
-      # -----------------------------------------
-      # Clone OpenWrt
-      # -----------------------------------------
-      - name: Clone OpenWrt master
-        run: |
-          git clone --depth 1 https://github.com/openwrt/openwrt.git src
+      - name: Clone OpenWrt
+        run: git clone --depth 1 https://github.com/openwrt/openwrt.git src
 
-      # -----------------------------------------
-      # Apply custom .config from your repo
-      # -----------------------------------------
-      - name: Install .config
-        run: |
-          cp config/.config src/.config
-
-      - name: Install latest mt76
-        run: |
-          cd src/package/kernel
-
-          echo "Removing bundled mt76..."
-          rm -rf mt76
-
-          echo "Cloning freshest mt76..."
-          git clone --depth 1 https://github.com/openwrt/mt76.git
-
-          echo "Replacing mt76 with upstream version:"
-          ls -1 mt76
-          
-      # Turbo-ccache (max speed)
-      - name: Restore ccache
-        uses: actions/cache@v3
-        with:
-         path: ${{ github.workspace }}/.ccache
-         key: ccache-${{ github.ref_name }}
-         restore-keys: |
-          ccache-${{ github.ref_name }}
-          ccache-
-
-      - name: Setup ccache
-        run: |
-         export CCACHE_DIR="${{ github.workspace }}/.ccache"
-         mkdir -p "$CCACHE_DIR"
-         ccache -M 20G
-         ccache --set-config=compression=true
-         ccache --set-config=compression_level=6
-         ccache --set-config=sloppiness=locale,time_macros,include_file_mtime
-         echo "CCACHE=ccache" >> $GITHUB_ENV
-         echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
-         ccache -s
-
-      # -----------------------------------------
-      # Apply patches from patches/
-      # (We use ONLY patch -p1 to avoid git identity issues)
-      # -----------------------------------------
-      - name: Apply patches
-        run: |
-          cd src
-          shopt -s nullglob
-          for p in ../patches/*.patch; do
-            echo "=== Applying $p ==="
-            if patch -p1 < "$p"; then
-              echo "Applied: $p"
-            else
-              echo "::error ::Patch failed: $p"
-              exit 1
-            fi
-          done
-
-      # ----------------------------------------
-      # FEEDS CACHE AND DL CACHE
-      # ----------------------------------------
-      - name: Restore DL cache
-        uses: actions/cache@v3
-        with:
-         path: src/dl
-         key: dl-cache
-         restore-keys: dl-cache
-      
-      - name: Restore feeds cache
-        uses: actions/cache@v3
-        with:
-         path: src/feeds
-         key: feeds-${{ github.ref_name }}
-         restore-keys: feeds-
-
-      # -----------------------------------------
-      # Install and update feeds
-      # -----------------------------------------
-      - name: Update feeds
+      - name: Update Feeds & Force Latest mt76
         run: |
           cd src
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # [span_11](start_span)Lecseréljük a gyári mt76-ot a legfrissebbre[span_11](end_span)
+          rm -rf package/kernel/mt76
+          git clone --depth 1 https://github.com/openwrt/mt76.git package/kernel/mt76
 
-      - name: Save feed cache
-        if: success()
-        uses: actions/cache/save@v3
-        with:
-         path: src/feeds
-         key: feeds-${{ github.ref_name }}
-         
-      - name: Save dl cache
-        if: success()
-        uses: actions/cache/save@v3
-        with:
-         path: src/dl
-         key: dl-cache
+      - name: Ghostbuster 0x7 & Custom Patches
+        run:  |
+          # 0x7 Szellemirtó fix - Anya sorozata miatt
+          find src/package/kernel/mt76/mt7615 -name "*.c" -exec sed -i 's/antenna_mask = 0xf/antenna_mask = 0x7/g' {} +
+          find src/package/kernel/mt76/mt7615 -name "*.c" -exec sed -i 's/chainmask = 0xf/chainmask = 0x7/g' {} +
+          find src/package/kernel/mt76/mt7615 -name "*.h" -exec sed -i 's/0xF/0x7/g' {} +
 
+          # Egyedi patchek behúzása a mappádból (ha van benne valami)
+          if [ -d "patches" ]; then
+            echo "Saját patchek alkalmazása..."
+            cp -r patches/* src/target/linux/ramips/patches-5.15/ 2>/dev/null || true
+            cp -r patches/* src/package/kernel/mt76/patches/ 2>/dev/null || true
+          fi
 
-      # -----------------------------------------
-      # Expand config with defconfig
-      # -----------------------------------------
-      - name: Run defconfig
+      - name: Install .config
+        run: cp config.txt src/.config
+
+      - name: Run defconfig & Safety Check
         run: |
-         cd src
-         make defconfig V=sc
+          cd src
+          make defconfig
+          # [span_13](start_span)Ellenőrizzük, hogy a Wi-Fi driver nem esett-e ki a tuning miatt[span_13](end_span)
+          grep "CONFIG_PACKAGE_kmod-mt7615e=y" .config || (echo "ERROR: Wi-Fi driver missing!" && exit 1)
 
-      # -----------------------------------------
-      # Build firmware
-      # -----------------------------------------
       - name: Build firmware
         run: |
           cd src
-          make -s -j$(nproc)
+          make -j$(nproc) || make -j1 V=s
 
-      # -----------------------------------------
-      # Upload logs on failure
-      # -----------------------------------------
-      - name: Upload build logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: src/logs/
-
-      # -----------------------------------------
-      # Upload firmware output
-      # -----------------------------------------
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ steps.detect.outputs.profile }}
-          path: src/bin/targets/${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}/
-          if-no-files-found: error
-
-      # -----------------------------------------
-      # Optional: Create GitHub Release (snapshot only)
-      # -----------------------------------------
-      - name: Create snapshot release
-        if: github.event_name == 'schedule'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: snapshot-${{ steps.detect.outputs.profile }}-${{ github.run_id }}
-          name: "Snapshot for ${{ steps.detect.outputs.profile }} (build ${{ github.run_id }})"
-          body: |
-            Snapshot firmware for:
-            - Device: ${{ steps.detect.outputs.profile }}
-            - Target: ${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}
-            - Build ID: ${{ github.run_id }}
-
-          files: src/bin/targets/${{ steps.detect.outputs.target }}/${{ steps.detect.outputs.subtarget }}/**
+          name: OpenWrt-R6800-Ghostbuster
+          path: src/bin/targets/ramips/mt7621/
+          

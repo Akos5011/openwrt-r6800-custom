@@ -26,6 +26,9 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Install .config
+        run: cp config/.config src/.config
+
       - name: 0x7 & Patches
         run:  |
           echo "Keresem és javítom az mt7615 forrásokat..."
@@ -40,8 +43,120 @@ jobs:
             cp -r patches/* src/package/kernel/mt76/patches/ 2>/dev/null || true
           fi
 
-      - name: Install .config
-        run: cp config/.config src/.config
+      - name: Apply tweaks for R6800
+        run: |
+          cd src
+          # 1. ERŐ: 1000MHz OC & 1000Hz Kernel (A CPU-alapú SQM-hez ez kell!)
+          find target/linux/ramips -name "*.dts*" -exec sed -i 's/880000/1000000/g' {} +
+          find target/linux/ramips -name "*.dtsi*" -exec sed -i 's/880000/1000000/g' {} +
+          sed -i 's/CONFIG_HZ_100=y/# CONFIG_HZ_100 is not set/' .config
+          echo "CONFIG_HZ_1000=y" >> .config
+          echo "CONFIG_HZ=1000" >> .config
+
+          # 2. DNS: DNS Cache Boost
+          sed -i 's/cachesize=150/cachesize=1000/' package/network/services/dnsmasq/files/dnsmasq.conf
+
+          # 3. SQM & ALGORITMUSOK: CAKE, BBRv3, TFO (50/8 netre optimalizálva)
+          echo "CONFIG_PACKAGE_luci-app-sqm=y" >> .config
+          echo "CONFIG_PACKAGE_sqm-scripts-extra=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-sched-cake=y" >> .config
+          echo "CONFIG_TCP_CONG_BBR=y" >> .config
+          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> .config
+          echo "CONFIG_INET_TCP_FOPEN=y" >> .config
+
+          # 4. RAM & CPU PRECÍZIÓ: RPS/XPS & TCP Pufferek (Logok nélkül)
+          echo "CONFIG_RPS=y" >> .config
+          echo "CONFIG_XPS=y" >> .config
+          echo "CONFIG_LOGIRQLOG=n" >> .config
+          echo "net.core.default_qdisc=cake" >> package/base-files/files/etc/sysctl.conf
+          echo "net.core.rmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
+          echo "net.core.wmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
+          
+          # 5. ENTROPY & FASTOPEN (Hogy ne várjon a titkosításra)
+          echo "CONFIG_PACKAGE_haveged=y" >> .config
+          echo "net.ipv4.tcp_fastopen=3" >> package/base-files/files/etc/sysctl.conf
+          
+          # 7. IRQ & CPU STEERING (Minden szál maxon)
+          echo "echo f > /sys/class/net/eth0/queues/rx-0/rps_cpus" >> package/base-files/files/etc/rc.local
+          echo "echo 32768 > /proc/sys/net/core/netdev_max_backlog" >> package/base-files/files/etc/sysctl.conf
+
+          # 8. NO-ATIME & FLASH OPTIMIZATION (Hogy ne lassuljon a rendszer)
+          sed -i 's/defaults/noatime,nodiratime/g' package/base-files/files/lib/functions/uci-defaults.sh
+
+          # 9. KERNEL MEMORY TUNING (Huge Pages & Puffer stabilitás)
+          echo "CONFIG_TRANSPARENT_HUGEPAGE=y" >> .config
+          echo "CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y" >> .config
+          
+          # 10. SUBOTICA AUDIO-LATENCY FIX (A 16kHz-es tiszta jelért)
+          echo "net.core.busy_poll=50" >> package/base-files/files/etc/sysctl.conf
+          echo "net.core.busy_read=50" >> package/base-files/files/etc/sysctl.conf
+
+          # 11. TCP SACK & WINDOW SCALING (Adatprés)
+          echo "net.ipv4.tcp_sack=1" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_window_scaling=1" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_timestamps=1" >> package/base-files/files/etc/sysctl.conf
+
+          # 12. IRQ COALESCING (Hogy ne várjon a hálózati kártya)
+          # Ezt az rc.local-ba tesszük, hogy indításkor élesedjen
+          echo "ethtool -C eth0 rx-usecs 0 tx-usecs 0" >> package/base-files/files/etc/rc.local
+
+          # 15. CPU LATENCY TUNING (Nincs alvás, csak 1000MHz)
+          echo "kernel.sched_min_granularity_ns=1000000" >> package/base-files/files/etc/sysctl.conf
+          echo "kernel.sched_wakeup_granularity_ns=2000000" >> package/base-files/files/etc/sysctl.conf
+          echo "echo 0 > /sys/module/cpuidle/parameters/off" >> package/base-files/files/etc/rc.local
+
+          # 16. RAM COMPACTION (A 256MB kimaxolása)
+          echo "vm.compact_unevictable_allowed=1" >> package/base-files/files/etc/sysctl.conf
+          echo "vm.extfrag_threshold=500" >> package/base-files/files/etc/sysctl.conf
+
+          # 17. NETWORK BACKLOG & FRAG (A sávszélesség-tartalék)
+          echo "net.core.netdev_max_backlog=5000" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.ipfrag_high_thresh=4194304" >> package/base-files/files/etc/sysctl.conf
+
+          # 19. ARP CACHE BOOST (Azonnali eszközfelismerés)
+          echo "net.ipv4.neigh.default.gc_thresh1=1024" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.neigh.default.gc_thresh2=2048" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.neigh.default.gc_thresh3=4096" >> package/base-files/files/etc/sysctl.conf
+
+          # 20. KERNEL SILENCE (Zéró log, zéró sallang)
+          echo "kernel.printk=0 0 0 0" >> package/base-files/files/etc/sysctl.conf
+
+          # 21. UDP STREAMS FOR "MALENA" (Audio-vizuális stabilitás)
+          echo "net.ipv4.udp_rmem_min=16384" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.udp_wmem_min=16384" >> package/base-files/files/etc/sysctl.conf
+
+                    # 22. NO POWER SAVE (Wi-Fi & Ethernet)
+          # Kikapcsoljuk a Wi-Fi és a LAN alvó módjait
+          echo "iw dev wlan0 set power_save off" >> package/base-files/files/etc/rc.local
+          echo "iw dev wlan1 set power_save off" >> package/base-files/files/etc/rc.local
+          echo "ethtool -s eth0 wol d" >> package/base-files/files/etc/rc.local
+
+          # 23. TCP EXTREME CONFIG (A sávszélesség-prés vége)
+          echo "net.ipv4.tcp_fastopen=3" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_mtu_probing=1" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_low_latency=1" >> package/base-files/files/etc/sysctl.conf
+
+          # 24. MU-MIMO & BEAMFORMING ENABLER (Driver szinten)
+          # Aktiváljuk, de a kontroll az SQM-nél marad
+          echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-mt7615-firmware=y" >> .config
+
+          # 25. THE FINAL SEAL - SOFTIRQ & NET STACK TUNING
+          # Növeljük a CPU "étvágyát" a hálózati csomagokhoz
+          echo "net.core.netdev_budget=600" >> package/base-files/files/etc/sysctl.conf
+          echo "net.core.netdev_budget_usecs=8000" >> package/base-files/files/etc/sysctl.conf
+          
+          # Hogy ne legyen "micro-stutter" a hálózaton
+          echo "net.ipv4.tcp_ecn=1" >> package/base-files/files/etc/sysctl.conf
+          echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
+          
+          # 26. THE SUBOTICA FINAL LOCK-IN
+          # Kényszerítjük az összes hálózati interfészt a többmagos módra (RPS)
+          echo "for x in /sys/class/net/*/queues/rx-0/rps_cpus; do echo f > \$x; done" >> package/base-files/files/etc/rc.local
+          
+          # Hogy a 16kHz-es audio teszted (Malena) soha ne akadjon meg:
+          echo "net.core.netdev_max_backlog=10000" >> package/base-files/files/etc/sysctl.conf
         
       - name: Run defconfig & Safety Check
         run: |

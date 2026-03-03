@@ -44,9 +44,8 @@ jobs:
           fi
 
       - name: Install .config
-        run: cp config/config.txt src/.config
+        run: cp config/.config src/.config
         
-
       - name: Run defconfig & Safety Check
         run: |
           cd src

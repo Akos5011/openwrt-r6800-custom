@@ -28,10 +28,10 @@ jobs:
 
       - name: 0x7 & Patches
         run:  |
-          # 0x7 Szellemirtó fix - Anya sorozata miatt
-          find src/package/kernel/mt76/mt7615 -name "*.c" -exec sed -i 's/antenna_mask = 0xf/antenna_mask = 0x7/g' {} +
-          find src/package/kernel/mt76/mt7615 -name "*.c" -exec sed -i 's/chainmask = 0xf/chainmask = 0x7/g' {} +
-          find src/package/kernel/mt76/mt7615 -name "*.h" -exec sed -i 's/0xF/0x7/g' {} +
+          echo "Keresem és javítom az mt7615 forrásokat..."
+          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/antenna_mask = 0xf/antenna_mask = 0x7/g'
+          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/chainmask = 0xf/chainmask = 0x7/g'
+          find src/ -type f -name "mt7615.h" -o -name "init.c" -o -name "main.c" | xargs -r sed -i 's/0xF/0x7/g'
 
           # Egyedi patchek behúzása a mappádból (ha van benne valami)
           if [ -d "patches" ]; then

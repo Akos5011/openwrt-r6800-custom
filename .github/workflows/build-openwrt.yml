@@ -31,11 +31,13 @@ jobs:
 
       - name: 0x7 & Patches
         run:  |
-          echo "mt7615 3-antenna fix loading..."
-          find src/ \( -name "mt7615.h" -o -name "init.c" -o -name "main.c" \) -type f \
-           -exec sed -i 's/\(antenna_mask\|chainmask\|rx_chainmask\) = 0x[fF]/\1 = 0x7/g' {} +
-          # Final catch-all for any missed 0xF defines in the radio-specific files
-          find src/ -type f -name "mt7615.h" | xargs -r sed -i '/antenna_mask\|chainmask\|rx_chainmask/ s/0x[fF]/0x7/' file.c
+          echo "MT7615 3-antenna fix: Applying surgical sed..."
+          find src/ -type f \( -name "mt7615.h" -o -name "init.c" -o -name "main.c" -o -name "eeprom.c" \) \
+           -exec sed -i 's/\(antenna_mask\|chainmask\|rx_chainmask\)[[:space:]]*=[[:space:]]*0x[fF]/\1 = 0x7/g' {} +
+
+          # Ellenőrzés (hogy ne csak placebo legyen):
+          echo "Verification - Finding 0x7 in modified files:"
+          grep -rnE "antenna_mask|chainmask|rx_chainmask" src/ | grep "0x7"
           
           find src/ -type f -name "mcu.c" | xargs -r sed -i 's/conf->scantime = 60/conf->scantime = 0/g'
           
@@ -102,9 +104,9 @@ jobs:
           echo "stop-dns-rebind" >> package/network/services/dnsmasq/files/dnsmasq.conf
 
           # 3. SQM & ALGORITMUSOK: CAKE, BBRv3, TFO (50/8 netre optimalizálva)
-          echo "CONFIG_PACKAGE_luci-app-sqm=y" >> .config
-          echo "CONFIG_PACKAGE_sqm-scripts-extra=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-sched-cake=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-sqm=n" >> .config
+          echo "CONFIG_PACKAGE_sqm-scripts-extra=n" >> .config
+          echo "CONFIG_PACKAGE_kmod-sched-cake=n" >> .config
           echo "CONFIG_TCP_CONG_BBR=y" >> .config
           echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> .config
           echo "CONFIG_INET_TCP_FOPEN=y" >> .config

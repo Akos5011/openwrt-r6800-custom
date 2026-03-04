@@ -43,32 +43,40 @@ jobs:
         
       - name: Tweaks
         run: |
-          cd src
-
-          # 1. Ellenőrizzük, létezik-e a patches mappa
-          if [ ! -d "patches" ]; then
-            echo "Nincs patches mappa, ugrás..."
+          # Meghatározzuk a patches mappa abszolút útvonalát (a repo gyökere)
+          PATCH_DIR="$(pwd)/patches"
+          
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "❌ HIBA: A '$PATCH_DIR' mappa nem létezik! Kérlek ellenőrizd a repódat!"
+            # Ha nincs mappa, de te akarsz patcheket, itt állítsd meg a buildet:
+            # exit 1 
             exit 0
           fi
 
-          echo "🚀 Univerzális patchelés indul..."
+          echo "✅ Patches mappa megtalálva: $PATCH_DIR"
+          cd src
           
-          # 2. Végigmegyünk minden .patch fájlon a mappádban
-          for patch_file in $(ls patches/*.patch); do
-            echo "🔍 Vizsgálat: $patch_file"
+          # Végigmegyünk az összes .patch fájlon
+          for patch_file in "$PATCH_DIR"/*.patch; do
+            # Ha nincs patch a mappában, a globbing miatt maga a sztring maradna meg, ezt kiszűrjük
+            [ -e "$patch_file" ] || continue
             
-            # Megpróbáljuk kitalálni a célkönyvtárat a patch tartalma alapján
-            # A 'patch -p1' az OpenWrt gyökeréből (src) futtatva a legbiztosabb
-            if patch -p1 -d src --dry-run < "$patch_file" > /dev/null 2>&1; then
-              patch -p1 -d src < "$patch_file"
-              echo "✅ $patch_file sikeresen alkalmazva (p1 szint)!"
-            elif patch -p0 -d src --dry-run < "$patch_file" > /dev/null 2>&1; then
-              patch -p0 -d src < "$patch_file"
-              echo "✅ $patch_file sikeresen alkalmazva (p0 szint)!"
+            echo "🔍 Alkalmazás: $(basename "$patch_file")"
+            
+            # Megpróbáljuk p1 szinten (OpenWrt standard)
+            if patch -p1 --dry-run < "$patch_file" > /dev/null 2>&1; then
+              patch -p1 < "$patch_file"
+              echo "  ✔️ Sikeresen alkalmazva (p1)"
+            # Ha nem megy, megpróbáljuk p0 szinten
+            elif patch -p0 --dry-run < "$patch_file" > /dev/null 2>&1; then
+              patch -p0 < "$patch_file"
+              echo "  ✔️ Sikeresen alkalmazva (p0)"
             else
-              echo "❌ Hiba: $patch_file nem illeszkedik a forrásra! (Talán rossz útvonal?)"
+              echo "  ⚠️ Hiba: A $(basename "$patch_file") nem illeszkedik!"
             fi
           done
+
+          cd src
           
           # 1. EXTRÉM OVERCLOCK (MT7621 @ 1100MHz - A fizika határain)
           find target/linux/ramips/dts/ -name "MT7621.dtsi" -exec sed -i 's/clock-frequency = <880000000>/clock-frequency = <1100000000>/g' {} +

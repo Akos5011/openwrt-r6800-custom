@@ -32,11 +32,15 @@ jobs:
 
       - name: 0x7 & Patches
         run:  |
-          echo "Applying fix to EVERY mt7615 file found on the runner..."
-          # A gyökértől kezdve mindent átírunk, ami mt7615-nek látszik
-          # Így nem számít az útvonal, nem számít a checkout
-          find . -path "*/mt7615/*" -type f \( -name "*.c" -o -name "*.h" \) \
-          -exec sed -i 's/0x[fF]/0x7/g' {} +
+          echo "Jelenlegi könyvtár:"
+          pwd
+          echo "Tartalom listázása (mélyen):"
+          # Ez megmutatja, hol vannak valójában a driverek
+          find . -maxdepth 4 -name "mt7615"
+          
+          # Ha megvan, kényszerítjük
+          echo "Applying fix..."
+          find . -path "*/mt76/mt7615/*" -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/0x[fF]/0x7/g' {} +
           
           echo "Proof of work:"
           find . -path "*/mt7615/*" -type f \( -name "*.c" -o -name "*.h" \) \

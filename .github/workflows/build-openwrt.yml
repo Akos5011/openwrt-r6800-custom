@@ -44,13 +44,34 @@ jobs:
       - name: Tweaks
         run: |
           cd src
+
+          # 1. Ellenőrizzük, létezik-e a patches mappa
+          if [ ! -d "patches" ]; then
+            echo "Nincs patches mappa, ugrás..."
+            exit 0
+          fi
+
+          echo "🚀 Univerzális patchelés indul..."
+          
+          # 2. Végigmegyünk minden .patch fájlon a mappádban
+          for patch_file in $(ls patches/*.patch); do
+            echo "🔍 Vizsgálat: $patch_file"
+            
+            # Megpróbáljuk kitalálni a célkönyvtárat a patch tartalma alapján
+            # A 'patch -p1' az OpenWrt gyökeréből (src) futtatva a legbiztosabb
+            if patch -p1 -d src --dry-run < "$patch_file" > /dev/null 2>&1; then
+              patch -p1 -d src < "$patch_file"
+              echo "✅ $patch_file sikeresen alkalmazva (p1 szint)!"
+            elif patch -p0 -d src --dry-run < "$patch_file" > /dev/null 2>&1; then
+              patch -p0 -d src < "$patch_file"
+              echo "✅ $patch_file sikeresen alkalmazva (p0 szint)!"
+            else
+              echo "❌ Hiba: $patch_file nem illeszkedik a forrásra! (Talán rossz útvonal?)"
+            fi
+          done
           
           # 1. EXTRÉM OVERCLOCK (MT7621 @ 1100MHz - A fizika határain)
           find target/linux/ramips/dts/ -name "MT7621.dtsi" -exec sed -i 's/clock-frequency = <880000000>/clock-frequency = <1100000000>/g' {} +
-          
-          # 2. ANTENNA FIX (Minden mt76 fájlban 0xF -> 0x7)
-          find package/kernel/mt76/src/ -name "*.c" -exec sed -i 's/0x[fF]/0x7/g' {} +
-          find package/kernel/mt76/src/ -name "*.h" -exec sed -i 's/0x[fF]/0x7/g' {} +
 
           # 3. HIGHMEM & OPTIMALIZÁCIÓ (A 250 MiB RAM kulcsa)
           echo "CONFIG_HIGHMEM=y" >> .config

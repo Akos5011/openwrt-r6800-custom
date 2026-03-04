@@ -40,210 +40,90 @@ jobs:
 
       - name: Install .config
         run: cp config/.config src/.config
-
-      - name: 0x7 & Patches
-        run:  |
-          echo "Mass-patching every single mt7615 file on the runner..."
-          # A '.' a teljes munkakönyvtárat jelenti. 
-          # Mindenbe belelövünk, aminek köze van az mt7615-höz.
-          find . -name "*mt7615*" -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/0x[fF]/0x7/g' {} +
-          
-          echo "Verification (Searching for 0x7):"
-          grep -rn "0x7" . | grep "mt7615" || echo "STILL NOTHING. Moving on to build anyway."
-          
-          find src/ -type f -name "mcu.c" | xargs -r sed -i 's/conf->scantime = 60/conf->scantime = 0/g'
-          
-          # Prevent MCU timeouts during high-load SQM processing
-          find src/package/kernel/mt76/ -type f -name "mcu.c" | xargs -r sed -i 's/MT76_MCU_TIMEOUT 100/MT76_MCU_TIMEOUT 500/g'
-
-          # Force driver to prioritize 80MHz/VHT bandwidth over neighbor 'noise'
-          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_HT_BSS_COEX_TGT_THRESHOLD 10/MT_HT_BSS_COEX_TGT_THRESHOLD 0/g'
-          
-          # Stop the driver from 'stepping back' for neighboring noise
-          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_HT_BSS_COEX_PERIOD 60/MT_HT_BSS_COEX_PERIOD 0/g'
-          
-          # Fix for older hardware dropping after rekeying
-          find src/ -type f -name "init.c" | xargs -r sed -i 's/dev->mt76.gtk_offload = true/dev->mt76.gtk_offload = false/g'
-          
-          # Disable A-MSDU offloading to prevent jitter and 'micro-crashes'
-          find src/ -type f -name "mmio.c" | xargs -r sed -i 's/MT_DRV_AMSDU_OFFLOAD,//g'
-          
-          # Force the driver to disable hardware-level Power Save Management (PSM)
-          find src/ -type f -name "init.c" | xargs -r sed -i 's/dev->mt76.psmode = true/dev->mt76.psmode = false/g'
-
-          # Align EEPROM logic with the physical 3-antenna board
-          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_EE_NIC_CONF_0_RX_PATH 4/MT_EE_NIC_CONF_0_RX_PATH 3/g'
-          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT_EE_NIC_CONF_0_TX_PATH 4/MT_EE_NIC_CONF_0_TX_PATH 3/g'
-          
-          find src/ -type f -name "mt7615.h" | xargs -r sed -i 's/MT7615_TX_WAIT_TIMEOUT 2/MT7615_TX_WAIT_TIMEOUT 5/g'
-          
-          if [ -d "patches" ]; then
-            echo "Applying custom patches..."
-            cp -r patches/* src/target/linux/ramips/patches-5.15/ 2>/dev/null || true
-            cp -r patches/* src/package/kernel/mt76/patches/ 2>/dev/null || true
-          fi
-
-      - name: Apply tweaks for R6800
+        
+      - name: Tweaks
         run: |
           cd src
-          # 1. ERŐ: 1000MHz OC & 1000Hz Kernel (A CPU-alapú SQM-hez ez kell!)
-          find target/linux/ramips -name "*.dts*" -exec sed -i 's/880000/1000000/g' {} +
-          find target/linux/ramips -name "*.dtsi*" -exec sed -i 's/880000/1000000/g' {} +
-          sed -i 's/CONFIG_HZ_100=y/# CONFIG_HZ_100 is not set/' .config
-          echo "CONFIG_HZ_1000=y" >> .config
-          echo "CONFIG_HZ=1000" >> .config
-          echo "CONFIG_PACKAGE_ethtool=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-mt76-connac=y" >> .config
-          echo "vm.vfs_cache_pressure=10" >> package/base-files/files/etc/sysctl.conf
-          echo "vm.dirty_ratio=10" >> package/base-files/files/etc/sysctl.conf
-          echo "vm.dirty_background_ratio=5" >> package/base-files/files/etc/sysctl.conf
-          sed -i 's/quiet/mitigations=off quiet/' target/linux/ramips/image/mt7621.mk
           
-          # Force the kernel to use the hardware random number generator faster
-          # This makes HTTPS handshakes for Spotify/YouTube feel instant
-          echo "CONFIG_PACKAGE_rng-tools=y" >> .config
-          echo "net.core.busy_read=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.busy_poll=1" >> package/base-files/files/etc/sysctl.conf
+          # 1. EXTRÉM OVERCLOCK (MT7621 @ 1100MHz - A fizika határain)
+          find target/linux/ramips/dts/ -name "MT7621.dtsi" -exec sed -i 's/clock-frequency = <880000000>/clock-frequency = <1100000000>/g' {} +
           
-          # Align network memory to the MT7621 cache lines
-          echo "net.core.netdev_tstamp_prequeue=0" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_limit_output_bytes=65536" >> package/base-files/files/etc/sysctl.conf
+          # 2. ANTENNA FIX (Minden mt76 fájlban 0xF -> 0x7)
+          find package/kernel/mt76/src/ -name "*.c" -exec sed -i 's/0x[fF]/0x7/g' {} +
+          find package/kernel/mt76/src/ -name "*.h" -exec sed -i 's/0x[fF]/0x7/g' {} +
 
-          # 2. DNS: DNS Cache Boost
-          sed -i 's/cachesize=1000/cachesize=4096/' package/network/services/dnsmasq/files/dnsmasq.conf
-          echo "min-cache-ttl=3600" >> package/network/services/dnsmasq/files/dnsmasq.conf
-          echo "address=/google-analytics.com/127.0.0.1" >> package/network/services/dnsmasq/files/dnsmasq.conf
-          echo "stop-dns-rebind" >> package/network/services/dnsmasq/files/dnsmasq.conf
+          # 3. HIGHMEM & OPTIMALIZÁCIÓ (A 250 MiB RAM kulcsa)
+          echo "CONFIG_HIGHMEM=y" >> .config
+          echo "CONFIG_CPU_MIPS32_R2=y" >> .config
+          echo "CONFIG_NR_CPUS=4" >> .config
 
-          # 3. SQM & ALGORITMUSOK: CAKE, BBRv3, TFO (50/8 netre optimalizálva)
-          echo "CONFIG_PACKAGE_luci-app-sqm=n" >> .config
-          echo "CONFIG_PACKAGE_sqm-scripts-extra=n" >> .config
-          echo "CONFIG_PACKAGE_kmod-sched-cake=n" >> .config
-          echo "CONFIG_TCP_CONG_BBR=y" >> .config
-          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> .config
-          echo "CONFIG_INET_TCP_FOPEN=y" >> .config
+          # 4. A MASSZÍV SYSCTL BLOKK (Konfliktusmentes /etc/sysctl.d/99-tuning.conf)
+          mkdir -p package/base-files/files/etc/sysctl.d/
+          cat <<EOF > package/base-files/files/etc/sysctl.d/99-tuning.conf
+          # --- NETWORK CORE TUNING ---
+          net.core.busy_read=50
+          net.core.busy_poll=50
+          net.core.netdev_max_backlog=16384
+          net.core.optmem_max=65536
+          net.core.rmem_default=16777216
+          net.core.rmem_max=16777216
+          net.core.wmem_default=16777216
+          net.core.wmem_max=16777216
+          net.core.somaxconn=4096
 
-          # 4. RAM & CPU PRECÍZIÓ: RPS/XPS & TCP Pufferek (Logok nélkül)
-          echo "CONFIG_RPS=y" >> .config
-          echo "CONFIG_XPS=y" >> .config
-          echo "CONFIG_LOGIRQLOG=n" >> .config
-          echo "CONFIG_PACKAGE_kmod-sched-fq=y" >> .config
-          echo "net.core.default_qdisc=fq" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.rmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.wmem_max=16777216" >> package/base-files/files/etc/sysctl.conf
-          # Reduce the time the router waits to "fill the bus" for A-MPDU
-          # This lowers absolute throughput but slashes the "stacking" jitter
-          echo "net.ipv4.tcp_min_tso_segs=1" >> package/base-files/files/etc/sysctl.conf
-          
-          # 5. ENTROPY & FASTOPEN (Hogy ne várjon a titkosításra)
-          echo "net.ipv4.tcp_fastopen=3" >> package/base-files/files/etc/sysctl.conf
-          # Force MSS Clamping so PPPoE doesn't fragment your audio packets
-          echo "net.ipv4.tcp_mtu_probing=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_base_mss=1024" >> package/base-files/files/etc/sysctl.conf
-          
-          # 7. IRQ & CPU STEERING (Minden szál maxon)
-          echo "echo 32768 > /proc/sys/net/core/netdev_max_backlog" >> package/base-files/files/etc/sysctl.conf
-          
-          # Enable Threaded IRQs for ultra-stable packet delivery
-          echo "kernel.threaded_irqs=1" >> package/base-files/files/etc/sysctl.conf
+          # --- TCP BRUTAL FORCE ---
+          net.ipv4.tcp_rmem=4096 87380 16777216
+          net.ipv4.tcp_wmem=4096 65536 16777216
+          net.ipv4.tcp_congestion_control=bbr
+          net.ipv4.tcp_fastopen=3
+          net.ipv4.tcp_fin_timeout=10
+          net.ipv4.tcp_keepalive_intvl=10
+          net.ipv4.tcp_keepalive_probes=5
+          net.ipv4.tcp_keepalive_time=600
+          net.ipv4.tcp_max_syn_backlog=8192
+          net.ipv4.tcp_max_tw_buckets=2000000
+          net.ipv4.tcp_no_metrics_save=1
+          net.ipv4.tcp_rfc1337=1
+          net.ipv4.tcp_sack=1
+          net.ipv4.tcp_fack=1
+          net.ipv4.tcp_window_scaling=1
+          net.ipv4.tcp_timestamps=0
+          net.ipv4.tcp_mtu_probing=1
+          net.ipv4.tcp_base_mss=1024
+          net.ipv4.tcp_workaround_signed_windows=1
+          net.ipv4.tcp_slow_start_after_idle=0
+          net.ipv4.tcp_tw_reuse=1
+          net.ipv4.ip_local_port_range=1024 65535
+          net.ipv4.tcp_notsent_lowat=16384
+          net.ipv4.tcp_limit_output_bytes=65536
+          net.ipv4.tcp_challenge_ack_limit=999999
 
-          # 8. NO-ATIME & FLASH OPTIMIZATION (Hogy ne lassuljon a rendszer)
-          sed -i 's/defaults/noatime,nodiratime/g' package/base-files/files/lib/functions/uci-defaults.sh
-          
-          # 10. AUDIO-LATENCY FIX (A 16kHz-es tiszta jelért)
-          echo "net.ipv4.tcp_low_latency=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_no_metrics_save=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.busy_poll=50" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.busy_read=50" >> package/base-files/files/etc/sysctl.conf
+          # --- UDP & VFS TUNING ---
+          net.ipv4.udp_rmem_min=16384
+          net.ipv4.udp_wmem_min=16384
+          vm.dirty_background_ratio=5
+          vm.dirty_ratio=10
+          vm.swappiness=10
+          vm.vfs_cache_pressure=50
+          fs.file-max=1000000
 
-          # 11. TCP SACK & WINDOW SCALING (Adatprés)
-          echo "net.ipv4.tcp_sack=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_window_scaling=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_timestamps=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.optmem_max=65536" >> package/base-files/files/etc/sysctl.conf
-          
-          # Keep the internal 'map' of your devices in RAM longer
-          echo "net.ipv4.neigh.default.gc_stale_time=120" >> package/base-files/files/etc/sysctl.conf
-          
-          echo "net.ipv4.udp_mem=65536 131072 262144" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_fin_timeout=15" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_keepalive_time=600" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_recovery=1" >> package/base-files/files/etc/sysctl.conf
-          
-          # Increase the initial window to allow videos to 'burst' into the buffer faster
-          echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_initial_cwnd=10" >> package/base-files/files/etc/sysctl.conf
-          
-          # Reduce the time the CPU waits before processing small packets
-          echo "net.ipv4.tcp_adv_win_scale=2" >> package/base-files/files/etc/sysctl.conf
-          
-          # 15. CPU LATENCY TUNING (Nincs alvás, csak 1000MHz)
-          echo "kernel.sched_min_granularity_ns=1000000" >> package/base-files/files/etc/sysctl.conf
-          echo "kernel.sched_wakeup_granularity_ns=2000000" >> package/base-files/files/etc/sysctl.conf
-          
-          # 16. RAM COMPACTION (A 256MB kimaxolása)
-          echo "vm.compact_unevictable_allowed=1" >> package/base-files/files/etc/sysctl.conf
-          echo "vm.extfrag_threshold=500" >> package/base-files/files/etc/sysctl.conf
-          
-          # Instant reboot on failure to protect hardware from 'stuck' states
-          echo "vm.panic_on_oom=1" >> package/base-files/files/etc/sysctl.conf
-          echo "kernel.panic=10" >> package/base-files/files/etc/sysctl.conf
+          # --- IPV6 & MISC ---
+          net.ipv6.conf.all.disable_ipv6=0
+          net.ipv6.conf.default.disable_ipv6=0
+          net.netfilter.nf_conntrack_max=1048576
+          net.netfilter.nf_conntrack_tcp_timeout_established=7440
+          EOF
 
-          # 17. FRAG (A sávszélesség-tartalék)
-          echo "net.ipv4.ipfrag_high_thresh=4194304" >> package/base-files/files/etc/sysctl.conf
-
-          # 19. ARP CACHE BOOST (Azonnali eszközfelismerés)
-          echo "net.ipv4.neigh.default.gc_thresh1=1024" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.neigh.default.gc_thresh2=2048" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.neigh.default.gc_thresh3=4096" >> package/base-files/files/etc/sysctl.conf
-
-          # 20. KERNEL SILENCE (Zéró log, zéró sallang)
-          echo "kernel.printk=0 0 0 0" >> package/base-files/files/etc/sysctl.conf
-
-          # 21. UDP STREAMS FOR "MALENA" (Audio-vizuális stabilitás)
-          echo "net.ipv4.udp_rmem_min=16384" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.udp_wmem_min=16384" >> package/base-files/files/etc/sysctl.conf
-
-          # 23. TCP EXTREME CONFIG (A sávszélesség-prés vége)
-          echo "net.ipv4.tcp_fastopen=3" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_mtu_probing=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_low_latency=1" >> package/base-files/files/etc/sysctl.conf
-
-          # 24. MU-MIMO & BEAMFORMING ENABLER (Driver szinten)
-          # Aktiváljuk, de a kontroll az SQM-nél marad
-          echo "CONFIG_PACKAGE_kmod-mt76-core=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-mt7615-firmware=y" >> .config
-          mkdir -p package/base-files/files/etc/modules.d
-          echo "options mt7615e beamforming=1" > package/base-files/files/etc/modules.d/mt7615e
-          echo "options mt7615e vht_beamformer=1 vht_beamformee=1" >> package/base-files/files/etc/modules.d/mt7615e
-
-          # 25. THE FINAL SEAL - SOFTIRQ & NET STACK TUNING
-          # Növeljük a CPU "étvágyát" a hálózati csomagokhoz
-          echo "net.core.netdev_budget=600" >> package/base-files/files/etc/sysctl.conf
-          echo "net.core.netdev_budget_usecs=8000" >> package/base-files/files/etc/sysctl.conf
-          
-          # Hogy ne legyen "micro-stutter" a hálózaton
-          echo "net.ipv4.tcp_ecn=1" >> package/base-files/files/etc/sysctl.conf
-          echo "net.ipv4.tcp_slow_start_after_idle=0" >> package/base-files/files/etc/sysctl.conf
-          echo "#!/bin/sh" > package/base-files/files/etc/rc.local
-          sed -i '1i sleep 5' package/base-files/files/etc/rc.local
+          # 5. RC.LOCAL SZTEROID (IRQ, PPS, Offloading)
+          sed -i '/exit 0/d' package/base-files/files/etc/rc.local
+          echo "echo 1000000 > /sys/class/net/eth0/queues/rx-0/rps_flow_cnt" >> package/base-files/files/etc/rc.local
           echo "for x in /sys/class/net/*/queues/rx-0/rps_cpus; do echo f > \$x; done" >> package/base-files/files/etc/rc.local
-          
-          # Kikapcsoljuk a Wi-Fi és a LAN alvó módjait
-          echo "iw dev wlan0 set power_save off" >> package/base-files/files/etc/rc.local
-          echo "iw dev wlan1 set power_save off" >> package/base-files/files/etc/rc.local
-          echo "ethtool -s eth0 wol d" >> package/base-files/files/etc/rc.local
-          echo "echo 0 > /sys/module/cpuidle/parameters/off" >> package/base-files/files/etc/rc.local
-          
-          # IRQ COALESCING (Hogy ne várjon a hálózati kártya)
-          # Ezt az rc.local-ba tesszük, hogy indításkor élesedjen
+          echo "ethtool -K eth0 gro on gso on tso on ufo on" >> package/base-files/files/etc/rc.local
           echo "ethtool -C eth0 rx-usecs 0 tx-usecs 0" >> package/base-files/files/etc/rc.local
-          
-          # Force the LAN switch to stay at full power 24/7
-          # No 'Green Ethernet' power saving (IEEE 802.3az) which causes 2ms wake-up lag
           echo "ethtool --set-eee eth0 eee off" >> package/base-files/files/etc/rc.local
+          echo "exit 0" >> package/base-files/files/etc/rc.local
           
+        
       - name: Run defconfig & Safety Check
         run: |
           cd src
@@ -262,4 +142,3 @@ jobs:
         with:
           name: OpenWrt-R6800
           path: src/bin/targets/ramips/mt7621/
-          

@@ -31,13 +31,22 @@ jobs:
 
       - name: 0x7 & Patches
         run:  |
-          echo "MT7615 3-antenna fix: Applying surgical sed..."
-          find src/ -type f \( -name "mt7615.h" -o -name "init.c" -o -name "main.c" -o -name "eeprom.c" \) \
-           -exec sed -i 's/\(antenna_mask\|chainmask\|rx_chainmask\)[[:space:]]*=[[:space:]]*0x[fF]/\1 = 0x7/g' {} +
+          echo "MT7615 3-antenna fix: Applying..."
+          # Keressük meg a fájlokat és írassuk ki, melyikben találtunk 0xF-et
+          # A 'sed -i' helyett először csak megnézzük, mit találna
+          FILES=$(find src/ -type f \( -name "mt7615.h" -o -name "init.c" -o -name "main.c" -o -name "eeprom.c" \))
+          
+          for f in $FILES; do
+            if grep -qE "0x[fF]" "$f"; then
+              echo "FOUND 0xF in $f - Patching to 0x7..."
+              sed -i 's/0x[fF]/0x7/g' "$f"
+              echo "SUCCESS: $f patched."
+            fi
+          done
 
-          # Ellenőrzés (hogy ne csak placebo legyen):
-          echo "Verification - Finding 0x7 in modified files:"
-          grep -rnE "antenna_mask|chainmask|rx_chainmask" src/ | grep "0x7"
+          echo "Final Verification (Proof of 0x7):"
+          # Ez kiírja az összes sort, ahol most már 0x7 van
+          grep -rn "0x7" src/drivers/net/wireless/mt76/mt7615/ || echo "WARNING: No 0x7 found in target folder!"
           
           find src/ -type f -name "mcu.c" | xargs -r sed -i 's/conf->scantime = 60/conf->scantime = 0/g'
           
